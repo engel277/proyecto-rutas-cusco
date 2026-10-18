@@ -1,4 +1,4 @@
-"Daniel - main.py"
+"MODELO 2 Daniel - main.py"
 # main.py
 # Persona 4 (Daniel): punto de entrada. Crea la ventana, carga el grafo y los pedidos de ejemplo
 # y llama a mainloop().
