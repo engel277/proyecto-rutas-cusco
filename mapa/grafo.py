@@ -1,4 +1,4 @@
-"FAUSTO: MODELO 1 - mapa/grafo.py"
+"FAUSTO: MODELO 2 - mapa/grafo.py"
 # grafo.py
 # Carga el mapa (grafo.json) y permite consultarlo y cerrar calles.
 
@@ -19,10 +19,11 @@ class Grafo:
         self.calles = {}              # id de esquina -> lista de (vecino, metros, nombre, id_arista). Una arista es un tramo de calle entre dos esquinas
         self.distritos = []           # Lista de (nombre, lat, lon)
         self.nombres_calles = []      # Nombres de calles que se pueden cerrar
+        self.etiquetas = []           # Puntos del mapa donde se escribe el nombre de una calle: diccionarios con nombre, lat, lon, angulo, rango (1 a 4) y largo (metros)
         self.limites = {}             # Norte, sur, este, oeste
         self.cerradas_nombre = set()  # Calles cerradas por nombre (cierra todos los tramos que se llamen así)
         self.cerradas_id = set()      # Tramos cerrados por id (para los "Sin nombre", que no se pueden cerrar por nombre)
-        self.version = 0              # Sube cada vez que se abre o cierra una calle. distancias.py la compara para saber si sus distancias guardadas quedaron viejas
+        self.version = 0              # Sube cada vez que se abre o cierra una calle. El mapa de la interfaz la compara para saber si debe repintar las calles cerradas
 
     # ------------------------------------------------------------------
     # Carga
@@ -36,6 +37,7 @@ class Grafo:
         # Datos generales del mapa: Copia los límites y los nombres de calles, y transforma los distritos en tuplas con su nombre y coordenadas.
         self.limites = datos["limites"]
         self.nombres_calles = datos["calles"]
+        self.etiquetas = datos.get("etiquetas", [])  # Con .get, un grafo.json anterior que no las traiga deja la lista vacía en vez de dar error
         self.distritos = [(d["nombre"], d["lat"], d["lon"]) for d in datos["distritos"]]  # De cada distrito guarda solo nombre y coordenadas
 
         # Para cada nodo, guarda sus coordenadas en self.nodos y crea una lista vacía en self.calles, preparada para recibir los tramos que salen de esa esquina.
@@ -54,13 +56,13 @@ class Grafo:
     # ------------------------------------------------------------------
     # Consultas
     # ------------------------------------------------------------------
-    # Devuelve las calles por las que se puede salir de una esquina. A* y Backtracking usan esto para avanzar
+    # Devuelve las calles por las que se puede salir de una esquina. El Backtracking usa esto para avanzar
     def vecinos(self, esquina):
         # Calles que salen de una esquina, sin las cerradas: (vecino, metros, nombre, id)
         return [c for c in self.calles[esquina]
                 if c[2] not in self.cerradas_nombre and c[3] not in self.cerradas_id]  # c[2] es el nombre y c[3] el id; se descarta la calle si cualquiera de los dos está cerrado
 
-    # Convierte unas coordenadas en una esquina del grafo, porque A* solo trabaja con esquinas
+    # Convierte unas coordenadas en una esquina del grafo, porque el Backtracking trabaja con esquinas y no con coordenadas
     def esquina_mas_cercana(self, lat, lon):
         # Id de la esquina más cercana a unas coordenadas (ubica un pedido en el mapa)
         mejor, mejor_d = None, float("inf")  # Empieza con distancia infinita para que cualquier esquina la mejore
