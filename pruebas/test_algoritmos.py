@@ -1,4 +1,4 @@
-"Daniel - pruebas/test_algoritmos.py"
+"MODELO 2 Daniel - pruebas/test_algoritmos.py"
 # pruebas/test_algoritmos.py
 # Persona 4 (Daniel): pruebas unitarias (unittest) de todos los algoritmos del proyecto.
 #
@@ -28,6 +28,11 @@ from algoritmos.divide_venceras import dividir_en_zonas, rutas_por_zona
 from algoritmos.mochila import llenar_mochila
 from algoritmos.backtracking import buscar_rutas, zona_por_divide_venceras
 from pruebas.benchmark import generar_pedidos, crear_cuadricula
+
+try:                                    # el canvas necesita tkinter; si no está, esas pruebas se saltan
+    from gui.canvas_mapa import rango_maximo, leer_etiqueta
+except ImportError:
+    rango_maximo = leer_etiqueta = None
 
 INF = float("inf")
 
@@ -438,6 +443,24 @@ class TestBacktracking(unittest.TestCase):
         self.assertIsNotNone(r.camino)
         self.assertGreaterEqual(r.ampliaciones, 1)
         self.assertAlmostEqual(r.metros, dijkstra(g, "0", "9"), places=6)
+
+
+# ===========================================================================
+# 5b. Mapa en pantalla: etiquetas de calles
+# ===========================================================================
+@unittest.skipIf(rango_maximo is None, "tkinter no está instalado")
+class TestEtiquetasDelMapa(unittest.TestCase):
+    def test_rango_visible_segun_el_zoom(self):
+        # z < 2: solo vías principales; < 5: hasta secundarias; < 12: hasta terciarias; más zoom: todas
+        esperado = {1.0: 1, 1.99: 1, 2.0: 2, 4.99: 2, 5.0: 3, 11.99: 3, 12.0: 4, 80.0: 4}
+        for zoom, rango in esperado.items():
+            self.assertEqual(rango_maximo(zoom), rango, msg=f"zoom {zoom}")
+
+    def test_leer_etiqueta_acepta_diccionario_y_lista(self):
+        datos = ("Av. El Sol", -13.52, -71.97, 15, 1, 820.0)
+        como_dic = dict(zip(("nombre", "lat", "lon", "angulo", "rango", "largo"), datos))
+        self.assertEqual(leer_etiqueta(como_dic), datos)
+        self.assertEqual(leer_etiqueta(list(datos)), datos)
 
 
 # ===========================================================================
