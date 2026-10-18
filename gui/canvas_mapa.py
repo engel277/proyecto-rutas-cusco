@@ -1,4 +1,4 @@
-"Daniel - gui/canvas_mapa.py"
+"MODELO 2: Daniel - gui/canvas_mapa.py" 
 # gui/canvas_mapa.py
 # Persona 4 (Daniel): CanvasMapa, el mapa de Cusco dibujado sobre un tk.Canvas.
 #
@@ -6,6 +6,7 @@
 #   - Dibuja todas las calles del grafo (mapa base) y los nombres de los distritos.
 #   - Dibuja pedidos (color según prioridad), repartidores y rutas (líneas de colores).
 #   - Dibuja en rojo las calles cerradas.
+#   - Escribe el nombre de las calles (grafo.etiquetas) con más o menos detalle según el zoom.
 #   - Zoom con la rueda del mouse y desplazamiento arrastrando con el mouse.
 #   - Avisa a la ventana cuando el usuario hace clic o mueve el mouse sobre el mapa.
 #
@@ -17,7 +18,8 @@
 #   dibujar_calle_cerrada(nombre=None, id_arista=None) y actualizar_cerradas()
 #
 # Qué necesita del grafo (el Grafo de Persona 1): limites, calles, distritos,
-# cerradas_nombre, cerradas_id y version.
+# cerradas_nombre, cerradas_id, version y etiquetas (si el grafo.json es viejo y no las trae,
+# simplemente no se escriben nombres de calles).
 
 import math
 import tkinter as tk
@@ -34,12 +36,39 @@ COLOR_REPARTIDOR = "#5e2a9e"
 COLORES_PRIORIDAD = {1: "#d62728",   # urgente
                      2: "#ff9800",   # normal
                      3: "#2e9e44"}   # baja
+COLOR_ETIQUETA = "#555555"
+FUENTE_ETIQUETA = ("TkDefaultFont", 8)
+ANCHO_LETRA = 5                   # píxeles que mide aproximadamente cada letra de la fuente de 8 pt
+ALTO_TEXTO = 10                   # píxeles de alto de una línea de texto
+CELDA = 12                        # lado (px) de las celdas de la cuadrícula que evita que las etiquetas se pisen
 RADIO_PEDIDO = 6
 LADO_REPARTIDOR = 7
 MARGEN = 20                       # píxeles libres alrededor del mapa al encuadrar
 FACTOR_ZOOM = 1.25
 ZOOM_MAXIMO = 80                  # veces el zoom inicial
 ZOOM_MINIMO = 0.4
+
+
+def rango_maximo(z):
+    """Hasta qué rango de calles se escribe el nombre, según el zoom z = escala actual / escala inicial.
+    Rango 1 = vías principales, 2 = secundarias, 3 = terciarias, 4 = el resto."""
+    if z < 2:
+        return 1
+    if z < 5:
+        return 2
+    if z < 12:
+        return 3
+    return 4
+
+
+def leer_etiqueta(e):
+    """Devuelve (nombre, lat, lon, angulo, rango, largo) de una etiqueta del grafo.
+    Acepta que venga como diccionario (claves nombre, lat, lon, angulo, rango, largo) o como
+    lista/tupla con esos seis datos en ese orden."""
+    if isinstance(e, dict):
+        return e["nombre"], e["lat"], e["lon"], e["angulo"], e["rango"], e["largo"]
+    nombre, lat, lon, angulo, rango, largo = e
+    return nombre, lat, lon, angulo, rango, largo
 
 
 class CanvasMapa(tk.Canvas):
@@ -128,26 +157,6 @@ class CanvasMapa(tk.Canvas):
         self._listo = True
         self._dibujar_todo()
 
-    def enfocar(self, puntos, margen_px=50):
-        """Acerca el mapa para que entren todos los `puntos` (lista de (lat, lon))."""
-        if not self._listo or not puntos:
-            return
-        ancho = self.winfo_width()
-        alto = self.winfo_height()
-        lats = [p[0] for p in puntos]
-        lons = [p[1] for p in puntos]
-        ancho_grados = max((max(lons) - min(lons)) * self._cos_lat, 1e-4)
-        alto_grados = max(max(lats) - min(lats), 1e-4)
-        escala = min((ancho - 2 * margen_px) / ancho_grados, (alto - 2 * margen_px) / alto_grados)
-        self._escala = max(self._escala_inicial * ZOOM_MINIMO,
-                           min(escala, self._escala_inicial * ZOOM_MAXIMO))
-        lat_c = (max(lats) + min(lats)) / 2
-        lon_c = (max(lons) + min(lons)) / 2
-        # Se coloca el centro del rectángulo en el centro de lo que se ve
-        self._x0 = self.canvasx(0) + ancho / 2 - self._escala * (lon_c - self._oeste) * self._cos_lat
-        self._y0 = self.canvasy(0) + alto / 2 - self._escala * (self._norte - lat_c)
-        self._dibujar_todo()
-
     def _al_cambiar_tamano(self, evento):
         # La primera vez que el canvas tiene tamaño se dibuja el mapa; después se respeta
         # el zoom del usuario (para volver a encuadrar está el botón de la ventana)
@@ -157,6 +166,7 @@ class CanvasMapa(tk.Canvas):
     def _dibujar_todo(self):
         self.delete("all")
         self._dibujar_calles()
+        self._dibujar_etiquetas()
         self._dibujar_distritos()
         self.actualizar_cerradas()
         self._dibujar_dinamicos()
@@ -175,6 +185,40 @@ class CanvasMapa(tk.Canvas):
                 xv, yv = self.convertir(*self.grafo.nodos[v])
                 self.create_line(xu, yu, xv, yv, fill=COLOR_CALLE, width=1,
                                  tags=("calle", "estatico"))
+
+    def _dibujar_etiquetas(self):
+        """Escribe el nombre de las calles. Cada etiqueta del grafo trae nombre, lat, lon, angulo
+        (ya corregido para que el texto no salga de cabeza), rango (1 principal ... 4 el resto) y largo.
+        Se muestran solo los rangos que corresponden al zoom actual y se saltan las etiquetas que
+        se solaparían con una ya puesta."""
+        etiquetas = getattr(self.grafo, "etiquetas", None)
+        if not etiquetas:
+            return
+        maximo = rango_maximo(self._escala / self._escala_inicial)
+        candidatas = [leer_etiqueta(e) for e in etiquetas]
+        candidatas = [c for c in candidatas if c[4] <= maximo]
+        # Primero las calles más importantes y, dentro de cada rango, las más largas: ganan el lugar
+        candidatas.sort(key=lambda c: (c[4], -c[5]))
+
+        ocupadas = set()               # celdas de la pantalla que ya tienen texto
+        for nombre, lat, lon, angulo, _rango, _largo in candidatas:
+            x, y = self.convertir(lat, lon)
+            # Caja que ocupa el texto girado (rectángulo ancho x alto rotado, aproximado)
+            ancho, alto = len(nombre) * ANCHO_LETRA, ALTO_TEXTO
+            c, s = abs(math.cos(math.radians(angulo))), abs(math.sin(math.radians(angulo)))
+            caja_x, caja_y = ancho * c + alto * s, ancho * s + alto * c
+            celdas = [(i, j)
+                      for i in range(int((x - caja_x / 2) // CELDA), int((x + caja_x / 2) // CELDA) + 1)
+                      for j in range(int((y - caja_y / 2) // CELDA), int((y + caja_y / 2) // CELDA) + 1)]
+            if any(celda in ocupadas for celda in celdas):
+                continue               # se pisaría con otra etiqueta: no se dibuja
+            ocupadas.update(celdas)
+            try:
+                self.create_text(x, y, text=nombre, angle=angulo, font=FUENTE_ETIQUETA,
+                                 fill=COLOR_ETIQUETA, tags=("etiqueta",))   # "angle" existe desde Tk 8.6
+            except tk.TclError:
+                self.create_text(x, y, text=nombre, font=FUENTE_ETIQUETA,
+                                 fill=COLOR_ETIQUETA, tags=("etiqueta",))   # Tk viejo: texto sin girar
 
     def _dibujar_distritos(self):
         # Nombre de cada distrito, para ubicarse en el mapa
@@ -295,8 +339,8 @@ class CanvasMapa(tk.Canvas):
         self._ordenar_capas()
 
     def _ordenar_capas(self):
-        # De abajo hacia arriba: calles, cerradas, nombres de distrito, rutas, pedidos, repartidores
-        for etiqueta in ("calle", "cerrada", "distrito", "ruta", "pedido", "repartidor"):
+        # De abajo hacia arriba: calles, cerradas, nombres de calle, nombres de distrito, rutas, pedidos, repartidores
+        for etiqueta in ("calle", "cerrada", "etiqueta", "distrito", "ruta", "pedido", "repartidor"):
             self.tag_raise(etiqueta)
 
     # ------------------------------------------------------------------
@@ -317,6 +361,11 @@ class CanvasMapa(tk.Canvas):
         self._x0 = cx + (self._x0 - cx) * factor
         self._y0 = cy + (self._y0 - cy) * factor
         self._escala = nueva
+        # Los nombres de calle NO llevan la etiqueta "estatico": scale() solo los movería, pero con otro
+        # zoom deben verse otros rangos. Por eso se borran y se vuelven a dibujar
+        self.delete("etiqueta")
+        self._dibujar_etiquetas()
+        self._ordenar_capas()
         self._dibujar_dinamicos()                   # pedidos y rutas se redibujan para no deformarse
 
     def _presionar(self, evento):
