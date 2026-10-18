@@ -1,4 +1,4 @@
-"Daniel - pruebas/benchmark.py"
+"MODELO 2 Daniel - pruebas/benchmark.py"
 # pruebas/benchmark.py
 # Persona 4 (Daniel): mide el rendimiento de los algoritmos con pedidos aleatorios de
 # 10, 50, 100, 500 y 1000 pedidos usando time.perf_counter().
