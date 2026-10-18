@@ -1,4 +1,4 @@
-"FAUSTO: MODELO 2 - algoritmos/backtracking.py"
+"FAUSTO: MODELO 3 - algoritmos/backtracking.py"
 # backtracking.py
 # Rutas con restricciones: busca rutas de un origen a un destino evitando las calles cerradas (grafo.vecinos() ya las salta) y se queda con la más corta.
 
@@ -62,6 +62,7 @@ class ResultadoBacktracking:
         self.esquinas_zona = 0     # esquinas de la zona donde se buscó
         self.ampliaciones = 0      # veces que hubo que ampliar la zona
         self.segundos = 0.0
+        self.profundidad_maxima = 0   # nivel más profundo que alcanzó la recursión (esquinas en el camino)
 
 
 # ----------------------------------------------------------------------
@@ -120,8 +121,10 @@ def zona_por_divide_venceras(grafo, origen, destino, max_esquinas, margen=150):
 # ----------------------------------------------------------------------
 # Busca la ruta más corta de origen a destino dentro de una zona del mapa, con poda y memoria para que sea rápida
 def buscar_rutas(grafo, origen, destino, max_esquinas=150, margen=150, tolerancia=0.0,
-                 max_segundos=300, poda=True, memo=True, detener=None):
+                 max_segundos=300, poda=True, memo=True, detener=None, traza=None):
     # detener: un threading.Event; si se activa, la búsqueda para y devuelve lo reunido.
+    # traza: función opcional traza(tipo, desde, hacia, metros, nivel) que recibe cada decisión
+    #        (avanzar, retroceder, meta, poda, memoria); sirve para mostrar el Backtracking paso a paso.
     resultado = ResultadoBacktracking()
 
     # Casos que no necesitan buscar nada
@@ -171,6 +174,8 @@ def buscar_rutas(grafo, origen, destino, max_esquinas=150, margen=150, toleranci
             if parada:  # Cuando alguna llamada detecta un tope o el botón Detener, las siguientes regresan sin explorar
                 return
             resultado.visitadas += 1  # Cada entrada a explorar() cuenta como una llamada recursiva
+            if len(camino) > resultado.profundidad_maxima:  # Guarda el nivel más profundo alcanzado
+                resultado.profundidad_maxima = len(camino)
             # Revisar el tiempo y el botón Detener cada 1000 llamadas para no frenar la búsqueda
             if resultado.visitadas % 1000 == 0:
                 if detener is not None and detener.is_set():  # is_set() es True si el usuario pulsó Detener
@@ -183,6 +188,8 @@ def buscar_rutas(grafo, origen, destino, max_esquinas=150, margen=150, toleranci
             # Caso base: se llegó al destino, se guarda una copia de la ruta
             if actual == destino:
                 resultado.encontradas += 1
+                if traza:
+                    traza("meta", actual, actual, metros, len(camino))
                 rutas.append((metros, list(camino)))  # list(camino) es una copia; el original sigue cambiando al retroceder
                 if len(rutas) > GUARDAR * 4:      # se dejan solo las más cortas
                     rutas.sort(key=lambda r: r[0])
@@ -204,19 +211,27 @@ def buscar_rutas(grafo, origen, destino, max_esquinas=150, margen=150, toleranci
                 # -------------------- PODA: ni en el mejor caso esta rama entra en el límite --------------------
                 if poda and metros + minimo > mejor * (1 + tolerancia):  # Lo recorrido + lo mínimo que falta ya pasa la mejor ruta
                     resultado.podas += 1
+                    if traza:
+                        traza("poda", actual, vecino, metros + minimo, len(camino))
                     continue
                 # Memoria: otra rama ya llegó a esta esquina con bastante menos costo
                 if memo:
                     if nuevo > costo.get(vecino, INF) * (1 + tolerancia):  # Llegar aquí por esta rama cuesta más que por otra: no puede dar una ruta mejor
                         resultado.podas += 1
+                        if traza:
+                            traza("memoria", actual, vecino, nuevo, len(camino))
                         continue
                     if nuevo < costo.get(vecino, INF):  # Es el nuevo menor costo para esta esquina: se anota
                         costo[vecino] = nuevo
                 camino.append(vecino)         # avanzar
                 visitado.add(vecino)
+                if traza:
+                    traza("avanzar", actual, vecino, nuevo, len(camino))
                 explorar(vecino, nuevo)
                 camino.pop()                  # ----------- RETROCEDER: elimina la última esquina del recorrido -----------
                 visitado.discard(vecino)      # Se libera la esquina para que otros caminos puedan usarla
+                if traza:
+                    traza("retroceder", vecino, actual, nuevo, len(camino))
 
         explorar(origen, 0.0)
 
