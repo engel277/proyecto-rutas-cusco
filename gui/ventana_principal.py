@@ -18,9 +18,8 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
-from gui.canvas_mapa import CanvasMapa, COLORES_PRIORIDAD, COLOR_REPARTIDOR, COLOR_CERRADA
+from gui.canvas_mapa import CanvasMapa
 from gui.pestana_pedidos import PestanaPedidos
-from gui.pestana_repartidores import PestanaRepartidores
 from gui.pestana_greedy import PestanaGreedy
 from gui.pestana_zonas import PestanaZonas
 from gui.pestana_mochila import PestanaMochila
@@ -32,23 +31,6 @@ except ImportError:
 
 from modelos import cargar_pedidos
 from pruebas.benchmark import generar_pedidos
-
-
-# Texto de ayuda que se muestra sobre las pestañas (cambia al elegir una pestaña)
-AYUDA = {
-    "Pedidos": "Agrega pedidos con el formulario (un clic en el mapa llena la latitud y la longitud), "
-               "ordénalos por prioridad o distancia y búscalos por ID o sector.",
-    "Repartidores": "Agrega o elimina repartidores: nombre, capacidad en kg y posición inicial "
-                    "(clic en el mapa). Aparecen como cuadrados morados.",
-    "Greedy": "Vecino más cercano: el repartidor elegido visita siempre el pedido más próximo que le "
-              "quepa. Abajo se puede asignar un pedido urgente al repartidor más cercano.",
-    "Zonas": "Divide y Vencerás: reparte la ciudad en una zona por repartidor y calcula la ruta de "
-             "cada uno. Cada zona se dibuja de un color.",
-    "Mochila": "Programación Dinámica: elige qué pedidos cargar para obtener el mayor valor sin "
-               "pasar la capacidad del repartidor.",
-    "Rutas": "Backtracking: busca la ruta más corta entre dos puntos evitando las calles cerradas. "
-             "Cierra calles y vuelve a buscar para ver el desvío.",
-}
 
 
 class App(tk.Tk):
@@ -96,18 +78,11 @@ class App(tk.Tk):
     def _crear_barra_superior(self):
         barra = ttk.Frame(self, padding=(8, 4))
         barra.pack(fill="x")
-        ttk.Label(barra, font=("TkDefaultFont", 10, "bold"),
-                  text="Cómo usar:  1) agrega pedidos y repartidores   2) elige una técnica en las "
-                       "pestañas   3) mira el resultado en el mapa").pack(side="left")
-        ttk.Button(barra, text="Ver todo el mapa",
+        ttk.Label(barra, text="Distancias en línea recta (Haversine).  "
+                              "Mapa: rueda = zoom, arrastrar = mover, clic = elegir un punto.",
+                  foreground="#666666").pack(side="left")
+        ttk.Button(barra, text="Reencuadrar mapa",
                    command=lambda: self.canvas.reencuadrar()).pack(side="right")
-        ttk.Button(barra, text="Acercar al centro",
-                   command=self._acercar_centro).pack(side="right", padx=6)
-
-    def _acercar_centro(self):
-        # Rectángulo de unos 4 x 5 km alrededor de la Plaza de Armas (donde se concentra la ciudad)
-        lat, lon = -13.5164, -71.9785
-        self.canvas.enfocar([(lat - 0.02, lon - 0.03), (lat + 0.02, lon + 0.03)])
 
     def _crear_cuerpo(self):
         # PanedWindow: el usuario puede arrastrar la barra del medio para dar más espacio al mapa
@@ -120,36 +95,17 @@ class App(tk.Tk):
         cuerpo.add(izquierda, weight=1)
         cuerpo.add(derecha, weight=2)
 
-        # Leyenda del mapa (debajo del mapa)
-        leyenda = ttk.Frame(derecha, padding=(8, 3))
-        leyenda.pack(side="bottom", fill="x")
-        elementos = [("●", COLORES_PRIORIDAD[1], "Pedido urgente"),
-                     ("●", COLORES_PRIORIDAD[2], "Pedido normal"),
-                     ("●", COLORES_PRIORIDAD[3], "Pedido de prioridad baja"),
-                     ("■", COLOR_REPARTIDOR, "Repartidor"),
-                     ("━", COLOR_CERRADA, "Calle cerrada")]
-        for simbolo, color, texto in elementos:
-            tk.Label(leyenda, text=simbolo, fg=color, font=("TkDefaultFont", 11)).pack(side="left")
-            ttk.Label(leyenda, text=texto).pack(side="left", padx=(0, 12))
-
         # El canvas se crea ANTES que las pestañas porque ellas lo usan como app.canvas
         self.canvas = CanvasMapa(derecha, self.grafo)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.al_clic = self._clic_en_mapa
         self.canvas.al_mover = self._mouse_en_mapa
 
-        # Ayuda de la pestaña elegida (qué hace y cómo se usa)
-        self.var_ayuda = tk.StringVar()
-        self.etiqueta_ayuda = ttk.Label(izquierda, textvariable=self.var_ayuda, wraplength=740,
-                                        justify="left", padding=(8, 6), background="#fff8dc")
-        self.etiqueta_ayuda.pack(fill="x")
-
         # Cuaderno con una pestaña por técnica algorítmica
         self.cuaderno = ttk.Notebook(izquierda)
         self.cuaderno.pack(fill="both", expand=True)
         self.pestanas = {
             "Pedidos": PestanaPedidos(self.cuaderno, self),
-            "Repartidores": PestanaRepartidores(self.cuaderno, self),
             "Greedy": PestanaGreedy(self.cuaderno, self),
             "Zonas": PestanaZonas(self.cuaderno, self),
             "Mochila": PestanaMochila(self.cuaderno, self),
@@ -157,12 +113,6 @@ class App(tk.Tk):
         }
         for titulo, pestana in self.pestanas.items():
             self.cuaderno.add(pestana, text=titulo)
-        self.cuaderno.bind("<<NotebookTabChanged>>", self._mostrar_ayuda)
-        self._mostrar_ayuda()
-
-    def _mostrar_ayuda(self, evento=None):
-        titulo = self.cuaderno.tab(self.cuaderno.select(), "text")
-        self.var_ayuda.set(AYUDA.get(titulo, ""))
 
     def _crear_barra_estado(self):
         barra = ttk.Frame(self, padding=(8, 2))
@@ -186,7 +136,7 @@ class App(tk.Tk):
         if hasattr(actual, "var_lat") and hasattr(actual, "var_lon"):
             actual.var_lat.set(f"{lat:.6f}")
             actual.var_lon.set(f"{lon:.6f}")
-            self.var_estado.set(f"Coordenadas copiadas al formulario: {lat:.5f}, {lon:.5f}")
+            self.var_estado.set("Coordenadas copiadas al formulario de Pedidos.")
         else:
             self.var_estado.set(f"Punto elegido: {lat:.6f}, {lon:.6f}")
 
