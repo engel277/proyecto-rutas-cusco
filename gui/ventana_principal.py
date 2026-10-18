@@ -1,4 +1,4 @@
-"Daniel - gui/ventana_principal.py"
+"MODELO 2 Daniel - gui/ventana_principal.py"
 # gui/ventana_principal.py
 # Persona 4 (Daniel): ventana principal de la aplicación.
 #
