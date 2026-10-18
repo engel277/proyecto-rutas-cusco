@@ -1,6 +1,6 @@
 "Daniel - gui/canvas_mapa.py"
 # gui/canvas_mapa.py
-# Persona 4 (JC): CanvasMapa, el mapa de Cusco dibujado sobre un tk.Canvas.
+# Persona 4 (Daniel): CanvasMapa, el mapa de Cusco dibujado sobre un tk.Canvas.
 #
 # Qué hace:
 #   - Dibuja todas las calles del grafo (mapa base) y los nombres de los distritos.
@@ -126,6 +126,26 @@ class CanvasMapa(tk.Canvas):
         self._x0 = self.canvasx(0) + (ancho - self._escala * ancho_grados) / 2
         self._y0 = self.canvasy(0) + (alto - self._escala * alto_grados) / 2
         self._listo = True
+        self._dibujar_todo()
+
+    def enfocar(self, puntos, margen_px=50):
+        """Acerca el mapa para que entren todos los `puntos` (lista de (lat, lon))."""
+        if not self._listo or not puntos:
+            return
+        ancho = self.winfo_width()
+        alto = self.winfo_height()
+        lats = [p[0] for p in puntos]
+        lons = [p[1] for p in puntos]
+        ancho_grados = max((max(lons) - min(lons)) * self._cos_lat, 1e-4)
+        alto_grados = max(max(lats) - min(lats), 1e-4)
+        escala = min((ancho - 2 * margen_px) / ancho_grados, (alto - 2 * margen_px) / alto_grados)
+        self._escala = max(self._escala_inicial * ZOOM_MINIMO,
+                           min(escala, self._escala_inicial * ZOOM_MAXIMO))
+        lat_c = (max(lats) + min(lats)) / 2
+        lon_c = (max(lons) + min(lons)) / 2
+        # Se coloca el centro del rectángulo en el centro de lo que se ve
+        self._x0 = self.canvasx(0) + ancho / 2 - self._escala * (lon_c - self._oeste) * self._cos_lat
+        self._y0 = self.canvasy(0) + alto / 2 - self._escala * (self._norte - lat_c)
         self._dibujar_todo()
 
     def _al_cambiar_tamano(self, evento):

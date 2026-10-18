@@ -167,7 +167,7 @@ def buscar_rutas(grafo, origen, destino, max_esquinas=150, margen=150, toleranci
         # ------------------------ NUCLEO DEL BACKTRACKING ------------------------
         # Función recursiva: prueba seguir por cada calle desde "actual"; si no sirve, retrocede
         def explorar(actual, metros):
-            nonlocal mejor, parada  # Se reasignan aquí; sin nonlocal serían variables nuevas (rutas solo se modifica con append, no hace falta)
+            nonlocal mejor, parada  # Se reasignan aquí; sin nonlocal serían variables nuevas (rutas solo se modifica con append)
             if parada:  # Cuando alguna llamada detecta un tope o el botón Detener, las siguientes regresan sin explorar
                 return
             resultado.visitadas += 1  # Cada entrada a explorar() cuenta como una llamada recursiva

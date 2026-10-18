@@ -20,9 +20,6 @@ except ImportError:
         return 2 * radio_tierra * asin(sqrt(h))
 
 
-INF = float("inf")   # distancia(a, b) devuelve infinito si no hay camino por calles (calles cerradas)
-
-
 # ---------------------------------------------------------------------------
 # VECINO MÁS CERCANO
 # ---------------------------------------------------------------------------
@@ -33,9 +30,7 @@ def vecino_mas_cercano(repartidor, pedidos):
     2. En cada paso elige el pendiente con menor distancia(posición_actual, pedido).
     3. Si el peso de ese pedido haría que la carga total supere la capacidad del
        repartidor, no se toma y se prueba con el siguiente más cercano.
-    4. Un pedido al que no se puede llegar (distancia infinita por calles cerradas)
-       también se salta, para que los metros totales nunca sean infinitos.
-    5. Termina cuando no queda ningún pendiente que quepa y sea alcanzable.
+    4. Termina cuando no queda ningún pendiente que quepa en el vehículo.
 
     No modifica la lista `pedidos` que recibe.
     Devuelve (lista_de_pedidos_en_orden, metros_totales).
@@ -56,8 +51,6 @@ def vecino_mas_cercano(repartidor, pedidos):
             if carga_actual + pedido.peso > repartidor.capacidad:
                 continue
             d = distancia(posicion, pedido)
-            if d == INF:                 # sin camino hasta ese pedido
-                continue
             if mejor_indice == -1 or d < mejor_distancia:
                 mejor_indice = i
                 mejor_distancia = d
@@ -80,8 +73,8 @@ def vecino_mas_cercano(repartidor, pedidos):
 # ---------------------------------------------------------------------------
 def asignar_urgente(pedido, repartidores):
     """Devuelve el repartidor más cercano al pedido entre los que tienen
-    capacidad suficiente (capacidad >= peso del pedido) y con camino hasta el
-    pedido. Si ninguno puede llevarlo, devuelve None."""
+    capacidad suficiente (capacidad >= peso del pedido). Si ninguno puede
+    llevarlo, devuelve None."""
     mejor = None
     mejor_distancia = 0.0
 
@@ -89,8 +82,6 @@ def asignar_urgente(pedido, repartidores):
         if repartidor.capacidad < pedido.peso:
             continue
         d = distancia(repartidor, pedido)
-        if d == INF:                     # sin camino (calles cerradas)
-            continue
         if mejor is None or d < mejor_distancia:
             mejor = repartidor
             mejor_distancia = d

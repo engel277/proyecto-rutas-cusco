@@ -1,6 +1,6 @@
 "Daniel - main.py"
 # main.py
-# Persona 4 (JC): punto de entrada. Crea la ventana, carga el grafo y los pedidos de ejemplo
+# Persona 4 (Daniel): punto de entrada. Crea la ventana, carga el grafo y los pedidos de ejemplo
 # y llama a mainloop().
 #
 # Ejecutar desde la carpeta del proyecto:   python main.py

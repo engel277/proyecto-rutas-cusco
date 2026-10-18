@@ -6,7 +6,6 @@
 #     app.pedidos       -> lista de Pedido
 #     app.repartidores  -> lista de Repartidor
 #     app.canvas        -> CanvasMapa con limpiar_rutas() y dibujar_ruta(puntos)  (opcional)
-#     app.ejecutar_en_hilo(trabajo, al_terminar, al_error)   (opcional: evita congelar la ventana)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -28,8 +27,7 @@ class PestanaMochila(ttk.Frame):
         self.combo = ttk.Combobox(barra, textvariable=self.var_repartidor,
                                   state="readonly", width=38)
         self.combo.pack(side="left", padx=6)
-        self.boton = ttk.Button(barra, text="Cargar", command=self._cargar)
-        self.boton.pack(side="left")
+        ttk.Button(barra, text="Cargar", command=self._cargar).pack(side="left")
 
         self.var_peso = tk.StringVar(value="Peso total: -")
         self.var_valor = tk.StringVar(value="Valor total: -")
@@ -73,33 +71,10 @@ class PestanaMochila(ttk.Frame):
             return
 
         repartidor = self._repartidores[indice]
-        pedidos = list(self.app.pedidos)
-
-        # Mochila (PD) y luego el orden de visita de lo elegido; en un hilo por si hay A*
-        def trabajo():
-            elegidos, peso_total, valor_total = llenar_mochila(pedidos, repartidor.capacidad)
-            ruta, _ = vecino_mas_cercano(repartidor, elegidos)
-            return elegidos, peso_total, valor_total, ruta
-
-        def terminado(resultado):
-            self.boton.state(["!disabled"])
-            elegidos, peso_total, valor_total, ruta = resultado
-            self._mostrar(repartidor, elegidos, peso_total, valor_total)
-            self._dibujar(repartidor, ruta)
-
-        def fallo(error):
-            self.boton.state(["!disabled"])
-            messagebox.showerror("Error", str(error))
-
-        self.boton.state(["disabled"])
-        en_hilo = getattr(self.app, "ejecutar_en_hilo", None)
-        if en_hilo is None:
-            try:
-                terminado(trabajo())
-            except Exception as error:
-                fallo(error)
-        else:
-            en_hilo(trabajo, terminado, fallo)
+        elegidos, peso_total, valor_total = llenar_mochila(self.app.pedidos,
+                                                           repartidor.capacidad)
+        self._mostrar(repartidor, elegidos, peso_total, valor_total)
+        self._dibujar(repartidor, elegidos)
 
     def _mostrar(self, repartidor, elegidos, peso_total, valor_total):
         for fila in self.tabla.get_children():
@@ -113,11 +88,12 @@ class PestanaMochila(ttk.Frame):
         dejados = len(self.app.pedidos) - len(elegidos)
         self.var_resto.set(f"{len(elegidos)} pedido(s) cargados, {dejados} se quedan en el almacén.")
 
-    def _dibujar(self, repartidor, ruta):
-        """Dibuja el recorrido de los pedidos elegidos (ya ordenados con el vecino más cercano)."""
+    def _dibujar(self, repartidor, elegidos):
+        """Dibuja el recorrido de los pedidos elegidos (ordenados con el vecino más cercano)."""
         canvas = getattr(self.app, "canvas", None)
-        if canvas is None or not ruta:
+        if canvas is None or not elegidos:
             return
+        ruta, _ = vecino_mas_cercano(repartidor, elegidos)
         puntos = [(repartidor.lat, repartidor.lon)] + [(p.lat, p.lon) for p in ruta]
         canvas.limpiar_rutas()
         canvas.dibujar_ruta(puntos)

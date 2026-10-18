@@ -1,13 +1,14 @@
-"Daniel- pruebas/benchmark.py"
+"Daniel - pruebas/benchmark.py"
 # pruebas/benchmark.py
-# Persona 4 (JC): mide el rendimiento de los algoritmos con pedidos aleatorios de
+# Persona 4 (Daniel): mide el rendimiento de los algoritmos con pedidos aleatorios de
 # 10, 50, 100, 500 y 1000 pedidos usando time.perf_counter().
 #
 # Genera los datos para la parte "Comparación de rendimiento" del informe:
 #   Tabla 1: tiempos de ordenación, búsqueda, Greedy, Divide y Vencerás y Mochila (PD)
 #   Tabla 2: Mochila exacta (PD) frente a una mochila voraz: ¿cuánto valor se pierde?
 #   Tabla 3: Vecino más cercano (Greedy) frente a la ruta óptima por fuerza bruta
-#   Tabla 4: A* frente a Backtracking en el mapa real (solo si existe herramientas/grafo.json)
+#   Tabla 4: Backtracking puro frente a Backtracking con poda y con poda + memoria
+#            (4a en cuadrículas armadas en memoria; 4b en el mapa real si existe herramientas/grafo.json)
 #
 # Ejecutar desde la carpeta del proyecto:   python -m pruebas.benchmark
 # Con gráfico (necesita matplotlib):        python -m pruebas.benchmark --grafico
@@ -22,10 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modelos import Pedido, Repartidor
 from mapa.distancias import distancia, distancia_recta
+from mapa.grafo import Grafo
 from algoritmos.ordenacion_busqueda import merge_sort, busqueda_binaria
 from algoritmos.greedy import vecino_mas_cercano
 from algoritmos.divide_venceras import dividir_en_zonas, rutas_por_zona
 from algoritmos.mochila import llenar_mochila
+from algoritmos.backtracking import buscar_rutas
 
 TAMANOS = (10, 50, 100, 500, 1000)
 
@@ -185,41 +188,101 @@ def tabla_greedy_vs_optimo():
 
 
 # ---------------------------------------------------------------------------
-# Tabla 4: A* frente a Backtracking en el mapa real (necesita grafo.json)
+# Tabla 4: Backtracking puro, con poda y con poda + memoria
 # ---------------------------------------------------------------------------
-def tabla_astar_vs_backtracking(ruta_grafo=None, pares=5):
+def crear_cuadricula(filas=3, columnas=3):
+    """Mapa de juguete armado en memoria: esquinas en cuadrícula con calles de doble sentido.
+    Las horizontales se llaman 'Fila r' y las verticales 'Columna c'; el costo de cada tramo es
+    su distancia de Haversine. La esquina (r, c) tiene id str(r * columnas + c), así que en 3x3
+    va de '0' (arriba a la izquierda) a '8' (abajo a la derecha).
+    La usan este benchmark y las pruebas unitarias, así no hace falta descargar el mapa real."""
+    g = Grafo()
+    g.limites = {"norte": -13.50, "sur": -13.50 - 0.001 * (filas - 1),
+                 "oeste": -71.98, "este": -71.98 + 0.001 * (columnas - 1)}
+    g.distritos = [("Cusco", -13.50, -71.98)]
+    for r in range(filas):
+        for c in range(columnas):
+            idx = str(r * columnas + c)
+            g.nodos[idx] = (-13.50 - 0.001 * r, -71.98 + 0.001 * c)
+            g.calles[idx] = []
+    contador = [0]                                  # contador de ids de tramos
+
+    def unir(a, b, nombre):
+        metros = distancia_recta(*g.nodos[a], *g.nodos[b])
+        g.calles[a].append((b, metros, nombre, contador[0]))
+        g.calles[b].append((a, metros, nombre, contador[0] + 1))
+        contador[0] += 2
+
+    for r in range(filas):
+        for c in range(columnas):
+            idx = str(r * columnas + c)
+            if c + 1 < columnas:
+                unir(idx, str(r * columnas + c + 1), f"Fila {r}")
+            if r + 1 < filas:
+                unir(idx, str((r + 1) * columnas + c), f"Columna {c}")
+    g.nombres_calles = sorted({t[2] for lista in g.calles.values() for t in lista})
+    return g
+
+
+# Las tres variantes del Backtracking que se comparan (poda, memo)
+VARIANTES = (("puro", False, False), ("poda", True, False), ("poda + memoria", True, True))
+
+
+def tabla_backtracking_cuadriculas():
+    """Tabla 4a: de una esquina a la opuesta en cuadrículas de lado 3 a 12.
+    El Backtracking puro prueba TODOS los caminos sin repetir esquinas (8 512 en 5x5, más de
+    un millón en 6x6), por eso solo se mide hasta 5x5."""
+    filas = []
+    for lado in (3, 4, 5, 8, 12):
+        grafo = crear_cuadricula(lado, lado)
+        destino = str(lado * lado - 1)
+        fila = [f"{lado}x{lado}", lado * lado]
+        for _nombre, poda, memo in VARIANTES:
+            if not poda and not memo and lado > 5:
+                fila += ["--", "--"]
+                continue
+            inicio = time.perf_counter()
+            r = buscar_rutas(grafo, "0", destino, poda=poda, memo=memo, max_segundos=30)
+            ms = (time.perf_counter() - inicio) * 1000
+            fila += [r.visitadas, f"{ms:.1f}"]
+        filas.append(tuple(fila))
+    imprimir_tabla("TABLA 4a - Backtracking en cuadrículas: llamadas recursivas y tiempo (ms)",
+                   ("mapa", "esquinas", "puro llam.", "puro ms", "poda llam.", "poda ms",
+                    "poda+mem llam.", "poda+mem ms"), filas)
+    return filas
+
+
+def tabla_backtracking_mapa_real(ruta_grafo=None, pares=5):
+    """Tabla 4b: pares de esquinas del mapa real a entre 0,5 y 1,5 km (solo si existe grafo.json).
+    Cada variante tiene un tope de 3 s; 'completo' dice si terminó antes del tope."""
     carpeta = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     ruta_grafo = ruta_grafo or os.path.join(carpeta, "herramientas", "grafo.json")
     if not os.path.exists(ruta_grafo):
-        print(f"\nTABLA 4 omitida: no existe {ruta_grafo}")
+        print(f"\nTABLA 4b omitida: no existe {ruta_grafo}")
         return []
-    from mapa.grafo import Grafo
-    from mapa.caminos import a_estrella
-    from algoritmos.backtracking import buscar_rutas
-
     grafo = Grafo()
     grafo.cargar(ruta_grafo)
     azar = random.Random(7)
     ids = list(grafo.nodos)
-    filas = []
-    intentos = 0
+    filas, intentos = [], 0
     while len(filas) < pares and intentos < 5000:
         intentos += 1
         a, b = azar.choice(ids), azar.choice(ids)
-        la, lo = grafo.nodos[a]
-        lb, lob = grafo.nodos[b]
-        if not 500 <= distancia_recta(la, lo, lb, lob) <= 1500:    # pares cercanos: ~0.5 a 1.5 km
+        if not 500 <= distancia_recta(*grafo.nodos[a], *grafo.nodos[b]) <= 1500:
             continue
-        stats = {}
-        t_astar = medir(lambda: a_estrella(grafo, a, b, stats), 3)
-        t_bt = medir(lambda: buscar_rutas(grafo, a, b, max_rutas=200, max_segundos=3), 1)
-        bt = buscar_rutas(grafo, a, b, max_rutas=200, max_segundos=3)
-        filas.append((len(filas) + 1, f"{bt.metros:.0f}", stats["explorados"], f"{t_astar:.2f}",
-                      bt.encontradas, bt.podas, bt.visitadas, f"{t_bt:.0f}",
-                      "sí" if bt.completo else "no (tope)"))
-    imprimir_tabla("TABLA 4 - Mapa real: A* vs Backtracking con poda (pares de 0.5 a 1.5 km)",
-                   ("par", "metros", "A* explorados", "A* ms", "rutas", "podas", "llamadas rec.",
-                    "BT ms", "completo"), filas)
+        fila = [len(filas) + 1]
+        for _nombre, poda, memo in VARIANTES:
+            inicio = time.perf_counter()
+            r = buscar_rutas(grafo, a, b, poda=poda, memo=memo, max_segundos=3)
+            ms = (time.perf_counter() - inicio) * 1000
+            fila += [r.visitadas, f"{ms:.0f}", "sí" if r.completo else "no"]
+            if poda and memo:
+                metros, zona = r.metros, r.esquinas_zona
+        fila[1:1] = [f"{metros:.0f}", zona]
+        filas.append(tuple(fila))
+    imprimir_tabla("TABLA 4b - Mapa real: Backtracking puro vs poda vs poda + memoria (tope 3 s)",
+                   ("par", "metros", "zona", "puro llam.", "puro ms", "compl.", "poda llam.",
+                    "poda ms", "compl.", "p+m llam.", "p+m ms", "compl."), filas)
     return filas
 
 
@@ -255,7 +318,8 @@ def ejecutar(con_grafico=False):
     filas = tabla_tiempos()
     tabla_mochila()
     tabla_greedy_vs_optimo()
-    tabla_astar_vs_backtracking()
+    tabla_backtracking_cuadriculas()
+    tabla_backtracking_mapa_real()
     if con_grafico:
         graficar(filas)
 

@@ -56,22 +56,27 @@ class PestanaPedidos(ttk.Frame):
 
         campos = [
             ("Cliente", ttk.Entry(marco, textvariable=self.var_cliente, width=22)),
-            ("Latitud", ttk.Entry(marco, textvariable=self.var_lat, width=12)),
-            ("Longitud", ttk.Entry(marco, textvariable=self.var_lon, width=12)),
             ("Sector", ttk.Combobox(marco, textvariable=self.var_sector, values=SECTORES,
                                     state="readonly", width=14)),
             ("Prioridad", ttk.Combobox(marco, textvariable=self.var_prioridad,
                                        values=list(PRIORIDADES.values()),
                                        state="readonly", width=11)),
+            ("Latitud", ttk.Entry(marco, textvariable=self.var_lat, width=12)),
+            ("Longitud", ttk.Entry(marco, textvariable=self.var_lon, width=12)),
             ("Peso (kg)", ttk.Entry(marco, textvariable=self.var_peso, width=8)),
             ("Valor (S/)", ttk.Entry(marco, textvariable=self.var_valor, width=8)),
         ]
-        for columna, (texto, widget) in enumerate(campos):
-            ttk.Label(marco, text=texto).grid(row=0, column=columna, padx=4, sticky="w")
-            widget.grid(row=1, column=columna, padx=4, pady=(0, 6), sticky="w")
+        # Dos filas de campos (así el botón Agregar siempre se ve, aunque el panel sea angosto)
+        posiciones = [(0, 0), (0, 1), (0, 2), (2, 0), (2, 1), (2, 2), (2, 3)]
+        for (texto, widget), (fila, columna) in zip(campos, posiciones):
+            ttk.Label(marco, text=texto).grid(row=fila, column=columna, padx=4, sticky="w")
+            widget.grid(row=fila + 1, column=columna, padx=4, pady=(0, 6), sticky="w")
 
-        ttk.Button(marco, text="Agregar", command=self._agregar).grid(
-            row=1, column=len(campos), padx=8, pady=(0, 6))
+        ttk.Button(marco, text="Agregar pedido", command=self._agregar).grid(
+            row=1, column=3, padx=8, pady=(0, 6), sticky="w")
+        ttk.Label(marco, foreground="#555555",
+                  text="Tip: haz clic en el mapa para llenar la latitud y la longitud.").grid(
+            row=4, column=0, columnspan=4, sticky="w", padx=4)
 
     def _crear_botones_orden(self):
         marco = ttk.Frame(self)
@@ -112,8 +117,8 @@ class PestanaPedidos(ttk.Frame):
         columnas = ("id", "cliente", "sector", "prioridad", "peso", "valor",
                     "lat", "lon", "distancia")
         titulos = ("ID", "Cliente", "Sector", "Prioridad", "Peso (kg)", "Valor (S/)",
-                   "Latitud", "Longitud", "Distancia (m)")
-        anchos = (40, 180, 100, 90, 70, 80, 90, 90, 100)
+                   "Latitud", "Longitud", "Dist. (m)")
+        anchos = (32, 140, 92, 82, 74, 80, 78, 80, 78)
 
         self.tabla = ttk.Treeview(marco, columns=columnas, show="headings", height=12)
         for col, titulo, ancho in zip(columnas, titulos, anchos):

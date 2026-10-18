@@ -1,12 +1,13 @@
 "Daniel - pruebas/test_algoritmos.py"
 # pruebas/test_algoritmos.py
-# Persona 4 (JC): pruebas unitarias (unittest) de todos los algoritmos del proyecto.
+# Persona 4 (Daniel): pruebas unitarias (unittest) de todos los algoritmos del proyecto.
 #
 # Ejecutar desde la carpeta del proyecto:   python -m unittest pruebas.test_algoritmos -v
 #
 # Cada prueba tiene un caso y un resultado esperado, para copiarlos al informe en la sección
-# "Casos y datos de prueba". Las pruebas del mapa NO usan grafo.json: arman una cuadrícula
-# pequeña de 3x3 esquinas en memoria, así corren rápido y en cualquier computador.
+# "Casos y datos de prueba". Las pruebas del mapa NO usan grafo.json: arman cuadrículas
+# pequeñas en memoria (crear_cuadricula, definida en pruebas/benchmark.py), así corren rápido
+# y en cualquier computador.
 
 import heapq
 import itertools
@@ -15,23 +16,18 @@ import random
 import sys
 import threading
 import unittest
-from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from modelos import Pedido, Repartidor
-from mapa import distancias
 from mapa.distancias import distancia, distancia_recta
-from mapa.grafo import Grafo
-from mapa.caminos import a_estrella
 from algoritmos.ordenacion_busqueda import (
     merge_sort, busqueda_binaria, agrupar_por_sector, normalizar_texto)
-from algoritmos import greedy
 from algoritmos.greedy import vecino_mas_cercano, asignar_urgente
 from algoritmos.divide_venceras import dividir_en_zonas, rutas_por_zona
 from algoritmos.mochila import llenar_mochila
-from algoritmos.backtracking import buscar_rutas
-from pruebas.benchmark import generar_pedidos
+from algoritmos.backtracking import buscar_rutas, zona_por_divide_venceras
+from pruebas.benchmark import generar_pedidos, crear_cuadricula
 
 INF = float("inf")
 
@@ -97,9 +93,6 @@ class TestOrdenacionBusqueda(unittest.TestCase):
 # 2. Greedy
 # ===========================================================================
 class TestGreedy(unittest.TestCase):
-    def setUp(self):
-        distancias.usar_grafo(None)      # distancias en línea recta, sin depender del mapa
-
     def test_vecino_mas_cercano_visita_en_orden_de_cercania(self):
         # Pedidos sobre una línea (mismo lat). Repartidor en lon=0.000. Distancias: 1 -> 0.001, 2 -> 0.003, 3 -> 0.002
         rep = Repartidor(1, "R", -13.5, -71.980, 100)
@@ -123,26 +116,6 @@ class TestGreedy(unittest.TestCase):
         vecino_mas_cercano(rep, pedidos)
         self.assertEqual(len(pedidos), 2)
 
-    def test_vecino_mas_cercano_salta_pedidos_inalcanzables(self):
-        # Si distancia() da infinito (calles cerradas) el pedido se deja fuera y los metros siguen finitos
-        rep = Repartidor(1, "R", -13.5, -71.980, 100)
-        pedidos = [pedido(1, lon=-71.979), pedido(2, lon=-71.978)]
-        original = greedy.distancia
-        greedy.distancia = lambda a, b: float("inf") if getattr(b, "id", 0) == 2 else original(a, b)
-        try:
-            ruta, metros = vecino_mas_cercano(rep, pedidos)
-        finally:
-            greedy.distancia = original
-        self.assertEqual([p.id for p in ruta], [1])
-        self.assertLess(metros, float("inf"))
-
-    def test_asignar_urgente_elige_el_mas_cercano_con_capacidad(self):
-        cerca_chico = Repartidor(1, "Cerca", -13.5, -71.979, 5)
-        lejos_grande = Repartidor(2, "Lejos", -13.5, -71.900, 50)
-        p = pedido(1, lon=-71.980, peso=10)
-        self.assertEqual(asignar_urgente(p, [cerca_chico, lejos_grande]).id, 2)   # el cercano no carga 10 kg
-        self.assertIsNone(asignar_urgente(pedido(2, peso=99), [cerca_chico, lejos_grande]))
-
     def test_vecino_mas_cercano_sin_pedidos(self):
         ruta, metros = vecino_mas_cercano(Repartidor(1, "R", -13.5, -71.98, 10), [])
         self.assertEqual((ruta, metros), ([], 0.0))
@@ -164,9 +137,6 @@ class TestGreedy(unittest.TestCase):
 # 3. Divide y Vencerás
 # ===========================================================================
 class TestDivideVenceras(unittest.TestCase):
-    def setUp(self):
-        distancias.usar_grafo(None)
-
     def repartidores(self, k):
         return [Repartidor(i, f"R{i}", -13.52 - 0.01 * i, -71.98 + 0.02 * i, 10 ** 6)
                 for i in range(1, k + 1)]
@@ -261,43 +231,10 @@ class TestMochila(unittest.TestCase):
 
 
 # ===========================================================================
-# 5. Mapa: A*, distancias por calles y Backtracking
+# 5. Mapa: distancias, grafo y Backtracking
 # ===========================================================================
-def crear_cuadricula(filas=3, columnas=3):
-    """Mapa de juguete: esquinas en cuadrícula, calles de doble sentido.
-    Las calles horizontales se llaman 'Fila r' y las verticales 'Columna c'.
-    Esquina (r, c) tiene id str(r * columnas + c): en 3x3 va de '0' (arriba izq.) a '8' (abajo der.)."""
-    g = Grafo()
-    g.limites = {"norte": -13.50, "sur": -13.50 - 0.001 * (filas - 1),
-                 "oeste": -71.98, "este": -71.98 + 0.001 * (columnas - 1)}
-    g.distritos = [("Cusco", -13.50, -71.98)]
-    for r in range(filas):
-        for c in range(columnas):
-            idx = str(r * columnas + c)
-            g.nodos[idx] = (-13.50 - 0.001 * r, -71.98 + 0.001 * c)
-            g.calles[idx] = []
-    id_arista = 0
-
-    def unir(a, b, nombre):
-        nonlocal id_arista
-        metros = distancia_recta(*g.nodos[a], *g.nodos[b])
-        g.calles[a].append((b, metros, nombre, id_arista))
-        g.calles[b].append((a, metros, nombre, id_arista + 1))
-        id_arista += 2
-
-    for r in range(filas):
-        for c in range(columnas):
-            idx = str(r * columnas + c)
-            if c + 1 < columnas:
-                unir(idx, str(r * columnas + c + 1), f"Fila {r}")
-            if r + 1 < filas:
-                unir(idx, str((r + 1) * columnas + c), f"Columna {c}")
-    g.nombres_calles = sorted({c[2] for lista in g.calles.values() for c in lista})
-    return g
-
-
 def dijkstra(grafo, origen, destino):
-    """Referencia sencilla (sin heurística) para comprobar que A* da el mismo resultado."""
+    """Referencia sencilla para comprobar que el Backtracking encuentra la ruta más corta real."""
     mejor = {origen: 0.0}
     cola = [(0.0, origen)]
     while cola:
@@ -317,128 +254,190 @@ def usa_calle(grafo, camino, nombre):
     return any(grafo.nombre_tramo(u, v) == nombre for u, v in zip(camino[:-1], camino[1:]))
 
 
-class TestMapa(unittest.TestCase):
+class TestDistancias(unittest.TestCase):
+    def test_un_grado_de_latitud_mide_unos_111_km(self):
+        self.assertAlmostEqual(distancia_recta(-13.0, -72.0, -14.0, -72.0), 111195, delta=100)
+
+    def test_es_simetrica_y_cero_entre_el_mismo_punto(self):
+        a, b = (-13.5164, -71.9785), (-13.5346, -71.9490)
+        self.assertAlmostEqual(distancia_recta(*a, *b), distancia_recta(*b, *a), places=6)
+        self.assertEqual(distancia_recta(*a, *a), 0.0)
+
+    def test_distancia_entre_objetos_usa_sus_coordenadas(self):
+        p = pedido(1, lat=-13.5, lon=-71.98)
+        r = Repartidor(1, "R", -13.51, -71.97, 10)
+        self.assertAlmostEqual(distancia(p, r), distancia_recta(-13.5, -71.98, -13.51, -71.97), places=6)
+
+
+class TestGrafo(unittest.TestCase):
     def setUp(self):
-        distancias.usar_grafo(None)
         self.g = crear_cuadricula()
 
-    def tearDown(self):
-        distancias.usar_grafo(None)
+    def test_vecinos_de_una_esquina_y_del_centro(self):
+        self.assertEqual(len(self.g.vecinos("0")), 2)      # esquina: 2 calles
+        self.assertEqual(len(self.g.vecinos("4")), 4)      # centro: 4 calles
 
-    def test_astar_coincide_con_dijkstra_en_todos_los_pares(self):
-        for a in self.g.nodos:
-            for b in self.g.nodos:
-                _, metros = a_estrella(self.g, a, b)
-                self.assertAlmostEqual(metros, dijkstra(self.g, a, b), places=6, msg=f"{a}->{b}")
-
-    def test_astar_ruta_valida(self):
-        camino, metros = a_estrella(self.g, "0", "8")
-        self.assertEqual(camino[0], "0")
-        self.assertEqual(camino[-1], "8")
-        self.assertEqual(len(camino), 5)                  # 4 tramos: 2 horizontales y 2 verticales
-
-    def test_astar_mismo_origen_y_destino(self):
-        self.assertEqual(a_estrella(self.g, "4", "4"), (["4"], 0.0))
-
-    def test_astar_evita_la_calle_cerrada(self):
-        # Esquina 0 -> 2 normalmente va por 'Fila 0'. Cerrada, debe bajar por la fila 1
-        directo, metros_directo = a_estrella(self.g, "0", "2")
-        self.assertTrue(usa_calle(self.g, directo, "Fila 0"))
+    def test_cerrar_y_abrir_calle_por_nombre(self):
         self.g.cerrar_calle("Fila 0")
-        desvio, metros_desvio = a_estrella(self.g, "0", "2")
-        self.assertFalse(usa_calle(self.g, desvio, "Fila 0"))
-        self.assertGreater(metros_desvio, metros_directo)
+        self.assertEqual([v[0] for v in self.g.vecinos("0")], ["3"])      # solo queda bajar
+        self.g.abrir_calle("Fila 0")
+        self.assertEqual(len(self.g.vecinos("0")), 2)
 
-    def test_astar_sin_camino_si_todo_esta_cerrado(self):
-        for nombre in self.g.nombres_calles:
-            self.g.cerrar_calle(nombre)
-        self.assertEqual(a_estrella(self.g, "0", "8"), (None, INF))
+    def test_cerrar_un_solo_tramo_por_id(self):
+        id_tramo = next(v[3] for v in self.g.calles["0"] if v[0] == "1")
+        self.g.cerrar_tramo(id_tramo)
+        self.assertEqual([v[0] for v in self.g.vecinos("0")], ["3"])
+        self.assertIn("0", [v[0] for v in self.g.vecinos("1")])           # la vuelta (otro id) sigue abierta
+        self.g.abrir_tramo(id_tramo)
+        self.assertEqual(len(self.g.vecinos("0")), 2)
 
-    def test_abrir_todas_restaura_el_camino(self):
+    def test_abrir_todas(self):
         self.g.cerrar_calle("Fila 0")
+        self.g.cerrar_calle("Columna 1")
         self.g.abrir_todas()
-        camino, _ = a_estrella(self.g, "0", "2")
-        self.assertTrue(usa_calle(self.g, camino, "Fila 0"))
+        self.assertEqual(len(self.g.vecinos("0")), 2)
+        self.assertEqual(len(self.g.vecinos("4")), 4)
+
+    def test_la_version_sube_en_cada_cambio(self):
+        v0 = self.g.version
+        self.g.cerrar_calle("Fila 0")
+        self.g.abrir_calle("Fila 0")
+        self.g.abrir_todas()
+        self.assertEqual(self.g.version, v0 + 3)
 
     def test_calles_sin_nombre_no_se_cierran_por_nombre(self):
         with self.assertRaises(ValueError):
             self.g.cerrar_calle("Sin nombre")
 
-    def test_distancia_por_calles_y_cache_se_actualiza_al_cerrar(self):
-        a = SimpleNamespace(lat=self.g.nodos["0"][0], lon=self.g.nodos["0"][1])
-        b = SimpleNamespace(lat=self.g.nodos["2"][0], lon=self.g.nodos["2"][1])
-        distancias.usar_grafo(self.g)
-        antes = distancia(a, b)
-        self.assertAlmostEqual(antes, a_estrella(self.g, "0", "2")[1], places=6)
-        self.g.cerrar_calle("Fila 0")                      # la versión del grafo sube y la memoria se vacía
-        despues = distancia(a, b)
-        self.assertGreater(despues, antes)
+    def test_esquina_mas_cercana(self):
+        lat, lon = self.g.nodos["4"]
+        self.assertEqual(self.g.esquina_mas_cercana(lat + 0.0001, lon - 0.0001), "4")
 
-    def test_distancia_infinita_si_no_hay_camino(self):
-        a = SimpleNamespace(lat=self.g.nodos["0"][0], lon=self.g.nodos["0"][1])
-        b = SimpleNamespace(lat=self.g.nodos["8"][0], lon=self.g.nodos["8"][1])
-        distancias.usar_grafo(self.g)
-        for nombre in self.g.nombres_calles:
-            self.g.cerrar_calle(nombre)
-        self.assertEqual(distancia(a, b), INF)
+    def test_sector_de_elige_el_distrito_mas_cercano(self):
+        self.g.distritos = [("Norte", -13.50, -71.98), ("Sur", -13.60, -71.90)]
+        self.assertEqual(self.g.sector_de(-13.501, -71.979), "Norte")
+        self.assertEqual(self.g.sector_de(-13.59, -71.91), "Sur")
 
-    def test_backtracking_encuentra_la_ruta_mas_corta(self):
-        # Con poda y memoria (lo normal) busca la ruta más corta y debe coincidir con A*
+    def test_nombre_del_tramo(self):
+        self.assertEqual(self.g.nombre_tramo("0", "1"), "Fila 0")
+        self.assertEqual(self.g.nombre_tramo("0", "3"), "Columna 0")
+        self.assertEqual(self.g.nombre_tramo("0", "8"), "Sin nombre")     # no están unidas
+
+
+class TestBacktracking(unittest.TestCase):
+    def setUp(self):
+        self.g = crear_cuadricula()
+
+    def test_ruta_mas_corta_coincide_con_dijkstra_en_todos_los_pares(self):
+        for a in self.g.nodos:
+            for b in self.g.nodos:
+                if a == b:
+                    continue
+                r = buscar_rutas(self.g, a, b)
+                self.assertAlmostEqual(r.metros, dijkstra(self.g, a, b), places=6, msg=f"{a}->{b}")
+
+    def test_la_ruta_empieza_y_termina_donde_debe(self):
         r = buscar_rutas(self.g, "0", "8")
-        self.assertTrue(r.completo)
         self.assertEqual(r.camino[0], "0")
         self.assertEqual(r.camino[-1], "8")
-        self.assertAlmostEqual(r.metros, a_estrella(self.g, "0", "8")[1], places=6)
+        self.assertEqual(len(r.camino), 5)                 # 4 tramos: 2 horizontales y 2 verticales
+        self.assertTrue(r.completo)
 
-    def test_backtracking_puro_encuentra_todas_las_rutas(self):
-        # Sin poda ni memoria es el backtracking puro: en la cuadrícula de 3x3 hay 12 caminos
-        # sin repetir esquinas de la 0 a la 8 (6 que solo avanzan y 6 con algún desvío)
-        r = buscar_rutas(self.g, "0", "8", poda=False, memo=False)
-        self.assertEqual(r.encontradas, 12)
-        self.assertEqual(r.podas, 0)
-        self.assertAlmostEqual(r.metros, a_estrella(self.g, "0", "8")[1], places=6)
-
-    def test_backtracking_rutas_ordenadas_y_sin_repetir_esquinas(self):
-        r = buscar_rutas(self.g, "0", "8", poda=False, memo=False)
-        self.assertGreater(len(r.rutas), 6)
-        metros = [m for m, _ in r.rutas]
-        self.assertEqual(metros, sorted(metros))                 # de menor a mayor
-        for _, camino in r.rutas:
-            self.assertEqual(camino[0], "0")
-            self.assertEqual(camino[-1], "8")
-            self.assertEqual(len(camino), len(set(camino)))      # ninguna esquina se repite
-
-    def test_backtracking_poda_descarta_ramas_y_da_la_misma_ruta(self):
-        pura = buscar_rutas(self.g, "0", "8", poda=False, memo=False)
-        podada = buscar_rutas(self.g, "0", "8")
-        self.assertGreater(podada.podas, 0)
-        self.assertLess(podada.visitadas, pura.visitadas)
-        self.assertAlmostEqual(podada.metros, pura.metros, places=6)
-
-    def test_backtracking_evita_calles_cerradas(self):
+    def test_evita_la_calle_cerrada(self):
+        # De "0" a "2" lo más corto es por 'Fila 0'. Cerrada, hay que bajar por la fila 1
+        directo = buscar_rutas(self.g, "0", "2")
+        self.assertTrue(usa_calle(self.g, directo.camino, "Fila 0"))
         self.g.cerrar_calle("Fila 0")
-        r = buscar_rutas(self.g, "0", "2", tolerancia=1.0)
-        self.assertGreaterEqual(r.encontradas, 1)
-        for _, camino in r.rutas:
-            self.assertFalse(usa_calle(self.g, camino, "Fila 0"))
-        self.assertAlmostEqual(r.metros, a_estrella(self.g, "0", "2")[1], places=6)
+        desvio = buscar_rutas(self.g, "0", "2")
+        self.assertFalse(usa_calle(self.g, desvio.camino, "Fila 0"))
+        self.assertGreater(desvio.metros, directo.metros)
+        self.assertAlmostEqual(desvio.metros, dijkstra(self.g, "0", "2"), places=6)
 
-    def test_backtracking_casos_sin_ruta(self):
+    def test_sin_ruta_si_todo_esta_cerrado(self):
         for nombre in self.g.nombres_calles:
             self.g.cerrar_calle(nombre)
         r = buscar_rutas(self.g, "0", "8")
         self.assertIsNone(r.camino)
-        self.assertEqual(r.encontradas, 0)
-        self.assertIsNone(buscar_rutas(self.g, "0", "no_existe").camino)
-        self.assertEqual(buscar_rutas(self.g, "3", "3").metros, 0.0)
+        self.assertEqual(r.rutas, [])
+        self.assertEqual(r.mensaje, "No hay ruta posible con las calles cerradas.")
 
-    def test_backtracking_se_puede_detener_desde_afuera(self):
-        # El botón "Detener" activa un threading.Event; la búsqueda para y avisa que no terminó
-        grande = crear_cuadricula(5, 5)
+    def test_origen_o_destino_inexistente(self):
+        r = buscar_rutas(self.g, "0", "no_existe")
+        self.assertIsNone(r.camino)
+        self.assertEqual(r.mensaje, "El origen o el destino no está en el mapa.")
+
+    def test_mismo_origen_y_destino(self):
+        r = buscar_rutas(self.g, "3", "3")
+        self.assertEqual((r.camino, r.metros), (["3"], 0.0))
+
+    def test_puro_encuentra_todas_las_rutas_sin_repetir_esquinas(self):
+        # Caminos simples entre esquinas opuestas: 12 en 3x3 y 184 en 4x4 (valores conocidos)
+        r3 = buscar_rutas(self.g, "0", "8", poda=False, memo=False)
+        self.assertEqual(r3.encontradas, 12)
+        r4 = buscar_rutas(crear_cuadricula(4, 4), "0", "15", poda=False, memo=False)
+        self.assertEqual(r4.encontradas, 184)
+
+    def test_rutas_ordenadas_y_validas(self):
+        r = buscar_rutas(self.g, "0", "8", poda=False, memo=False)
+        metros = [m for m, _ in r.rutas]
+        self.assertEqual(len(r.rutas), 12)
+        self.assertEqual(metros, sorted(metros))           # de menor a mayor
+        self.assertAlmostEqual(r.metros, metros[0], places=9)
+        for _, camino in r.rutas:
+            self.assertEqual((camino[0], camino[-1]), ("0", "8"))
+            self.assertEqual(len(camino), len(set(camino)))    # ninguna esquina se repite
+
+    def test_poda_y_memoria_reducen_las_llamadas_sin_perder_la_mejor_ruta(self):
+        g5 = crear_cuadricula(5, 5)
+        puro = buscar_rutas(g5, "0", "24", poda=False, memo=False)
+        poda = buscar_rutas(g5, "0", "24", poda=True, memo=False)
+        ambas = buscar_rutas(g5, "0", "24", poda=True, memo=True)
+        self.assertGreater(puro.visitadas, poda.visitadas)
+        self.assertGreater(poda.visitadas, ambas.visitadas)
+        self.assertAlmostEqual(puro.metros, poda.metros, places=6)
+        self.assertAlmostEqual(puro.metros, ambas.metros, places=6)
+
+    def test_tolerancia_agrega_alternativas(self):
+        g4 = crear_cuadricula(4, 4)
+        solo_corta = buscar_rutas(g4, "0", "15", tolerancia=0.0)
+        con_alternativas = buscar_rutas(g4, "0", "15", tolerancia=0.6)
+        self.assertGreater(len(con_alternativas.rutas), len(solo_corta.rutas))
+        limite = con_alternativas.metros * 1.6 + 1e-6
+        self.assertTrue(all(m <= limite for m, _ in con_alternativas.rutas))
+
+    def test_detener_corta_la_busqueda(self):
         parar = threading.Event()
-        parar.set()
-        r = buscar_rutas(grande, "0", "24", poda=False, memo=False, detener=parar)
+        parar.set()                                        # el botón Detener ya estaba pulsado
+        r = buscar_rutas(crear_cuadricula(5, 5), "0", "24", poda=False, memo=False, detener=parar)
         self.assertFalse(r.completo)
+
+    def test_tope_de_tiempo_corta_la_busqueda(self):
+        r = buscar_rutas(crear_cuadricula(5, 5), "0", "24", poda=False, memo=False, max_segundos=1e-9)
+        self.assertFalse(r.completo)
+
+    def test_zona_de_divide_y_venceras_contiene_origen_y_destino(self):
+        g = crear_cuadricula(10, 10)
+        zona = zona_por_divide_venceras(g, "11", "33", max_esquinas=30)
+        self.assertIn("11", zona)
+        self.assertIn("33", zona)
+        self.assertLess(len(zona), 100)                    # se descartó parte del mapa
+
+    def test_busqueda_en_zona_reducida_da_la_ruta_correcta(self):
+        g = crear_cuadricula(10, 10)
+        r = buscar_rutas(g, "11", "33", max_esquinas=30)
+        self.assertLess(r.esquinas_zona, 100)
+        self.assertAlmostEqual(r.metros, dijkstra(g, "11", "33"), places=6)
+
+    def test_amplia_la_zona_si_dentro_no_hay_ruta(self):
+        # Con las filas 0 a 5 cerradas, ir de "0" a "9" obliga a bajar hasta la fila 6. La zona inicial
+        # (filas 0 a 5) no la incluye, así que no hay ruta ahí: la zona se amplía y entonces se encuentra
+        g = crear_cuadricula(10, 10)
+        for fila in range(6):
+            g.cerrar_calle(f"Fila {fila}")
+        r = buscar_rutas(g, "0", "9", max_esquinas=20)
+        self.assertIsNotNone(r.camino)
+        self.assertGreaterEqual(r.ampliaciones, 1)
+        self.assertAlmostEqual(r.metros, dijkstra(g, "0", "9"), places=6)
 
 
 # ===========================================================================

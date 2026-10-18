@@ -6,7 +6,6 @@
 #     app.pedidos       -> lista de Pedido
 #     app.repartidores  -> lista de Repartidor
 #     app.canvas        -> CanvasMapa con limpiar_rutas() y dibujar_ruta(puntos[, color])
-#     app.ejecutar_en_hilo(trabajo, al_terminar, al_error)   (opcional: evita congelar la ventana)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -24,8 +23,7 @@ class PestanaZonas(ttk.Frame):
 
         barra = ttk.Frame(self)
         barra.pack(fill="x", padx=8, pady=8)
-        self.boton = ttk.Button(barra, text="Dividir ciudad", command=self._dividir)
-        self.boton.pack(side="left")
+        ttk.Button(barra, text="Dividir ciudad", command=self._dividir).pack(side="left")
         self.var_info = tk.StringVar(value="Se usa a todos los repartidores y todos los pedidos.")
         ttk.Label(barra, textvariable=self.var_info).pack(side="left", padx=10)
 
@@ -61,32 +59,10 @@ class PestanaZonas(ttk.Frame):
             messagebox.showwarning("Sin pedidos", "No hay pedidos cargados.")
             return
 
-        pedidos = list(self.app.pedidos)
-
-        # Con distancias por calles (A*) las rutas pueden tardar: se calcula en un hilo
-        def trabajo():
-            zonas = dividir_en_zonas(pedidos, repartidores)
-            return zonas, rutas_por_zona(zonas)
-
-        def terminado(resultado):
-            self.boton.state(["!disabled"])
-            zonas, resultados = resultado
-            self._mostrar(zonas, resultados)
-            self._dibujar(resultados)
-
-        def fallo(error):
-            self.boton.state(["!disabled"])
-            messagebox.showerror("Error", str(error))
-
-        self.boton.state(["disabled"])
-        en_hilo = getattr(self.app, "ejecutar_en_hilo", None)
-        if en_hilo is None:
-            try:
-                terminado(trabajo())
-            except Exception as error:
-                fallo(error)
-        else:
-            en_hilo(trabajo, terminado, fallo)
+        zonas = dividir_en_zonas(self.app.pedidos, repartidores)
+        resultados = rutas_por_zona(zonas)
+        self._mostrar(zonas, resultados)
+        self._dibujar(resultados)
 
     def _mostrar(self, zonas, resultados):
         for fila in self.tabla.get_children():
@@ -105,7 +81,7 @@ class PestanaZonas(ttk.Frame):
         self.var_total.set(f"Metros totales (todas las zonas): {total_metros:,.0f} m  "
                            f"({total_metros / 1000:.2f} km)")
         if sin_entrar > 0:
-            self.var_aviso.set(f"{sin_entrar} pedido(s) no entraron (capacidad del repartidor de su zona o sin camino por calles cerradas).")
+            self.var_aviso.set(f"{sin_entrar} pedido(s) no entraron por capacidad del repartidor de su zona.")
         else:
             self.var_aviso.set("")
 
