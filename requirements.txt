@@ -1,0 +1,8 @@
+# Para ejecutar la aplicación (main.py), las pruebas y el benchmark NO hace falta instalar nada:
+# solo se usa la biblioteca estándar de Python 3.8+ (incluye tkinter).
+#
+# Solo si se quiere volver a generar el mapa (herramientas/mapacusco.py):
+osmnx
+
+# Opcional, solo para el gráfico del benchmark (python -m pruebas.benchmark --grafico):
+matplotlib
