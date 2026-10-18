@@ -1,8 +1,9 @@
-"FAUSTO: MODELO 1 - herramientas/mapacusco.py"
+"FAUSTO: MODELO 2 - herramientas/mapacusco.py"
 #mapacusco.py
 #Descarga la red vial de Cusco desde OpenStreetMap (con osmnx) y la guarda en herramientas/grafo.json (junto a este archivo).
 
 import json
+import math
 from pathlib import Path
 import osmnx as ox # OpenStreetMap para Python
 
@@ -34,6 +35,34 @@ DISTRITOS = [
 BUFFER = 0.01  # margen extra en grados (~1 km) para no cortar calles justo en el borde
 
 # ---------------------------------------------------------------------------
+# Importancia de cada tipo de vía (1 = la más importante). Sirve para decidir qué
+# nombres se muestran de lejos y cuáles solo al acercar el mapa. Cualquier otro
+# tipo (residential, unclassified, living_street...) vale 4.
+# ---------------------------------------------------------------------------
+RANGOS_VIA = {
+    "motorway": 1, "motorway_link": 1, "trunk": 1, "trunk_link": 1,
+    "primary": 1, "primary_link": 1,
+    "secondary": 2, "secondary_link": 2,
+    "tertiary": 3, "tertiary_link": 3,
+}
+LARGO_MINIMO = 40        # metros: no se rotulan tramos más cortos (salvo el más largo de cada calle)
+M_POR_GRADO = 111320     # metros que mide un grado de latitud
+
+
+def primero(valor):
+    # osmnx a veces entrega una lista de valores; se usa el primero
+    if isinstance(valor, list):
+        return valor[0] if valor else ""
+    return valor or ""
+
+
+def metros_entre(lat1, lon1, lat2, lon2):
+    # Distancia aproximada en metros (suficiente para distancias cortas)
+    return math.hypot((lat2 - lat1) * M_POR_GRADO,
+                      (lon2 - lon1) * M_POR_GRADO * math.cos(math.radians(lat1)))
+
+
+# ---------------------------------------------------------------------------
 # Rectángulo que cubre todos los distritos (orden de osmnx 2.x: oeste, sur, este, norte)
 # ---------------------------------------------------------------------------
 lats = [d[1] for d in DISTRITOS]
@@ -60,26 +89,68 @@ nodos = [{"id": str(n), "lat": round(d["y"], 6), "lon": round(d["x"], 6)}
 
 # ---------------------------------------------------------------------------
 # Aristas: cada tramo de calle, con id propio, longitud en metros, nombre y sentido
+# Si OpenStreetMap no tiene nombre, se usa la referencia de la vía (ref); si tampoco
+# la tiene, queda "Sin nombre"
 # ---------------------------------------------------------------------------
 aristas = []
+tramos_por_calle = {}     # nombre -> lista de (largo, origen, destino, rango); para las etiquetas
+vistos = set()            # una calle de doble sentido aparece dos veces; se rotula una sola
 for i, (u, v, k, data) in enumerate(G.edges(keys=True, data=True)):
-    nombre = data.get("name", "")
-    if isinstance(nombre, list):                   # a veces OSM da varios nombres
-        nombre = nombre[0] if nombre else ""
+    nombre = primero(data.get("name")) or primero(data.get("ref")) or "Sin nombre"
+    largo = round(data.get("length", 0), 2)  # metros
     aristas.append({
         "id": i,
         "origen": str(u),
         "destino": str(v),
-        "costo": round(data.get("length", 0), 2),  # metros
-        "nombre": nombre if nombre else "Sin nombre",
+        "costo": largo,
+        "nombre": nombre,
         "sentido_unico": bool(data.get("oneway", False)),
     })
+    if nombre != "Sin nombre":
+        clave = (min(u, v), max(u, v), nombre)
+        if clave not in vistos:
+            vistos.add(clave)
+            rango = RANGOS_VIA.get(primero(data.get("highway")), 4)
+            tramos_por_calle.setdefault(nombre, []).append((largo, str(u), str(v), rango))
 
 # ---------------------------------------------------------------------------
 # Lista de nombres de calles, para elegir cuáles cerrar desde la interfaz
 # (los tramos "Sin nombre" solo se pueden cerrar por su id)
 # ---------------------------------------------------------------------------
 calles = sorted({a["nombre"] for a in aristas if a["nombre"] != "Sin nombre"})
+
+# ---------------------------------------------------------------------------
+# Etiquetas: puntos del mapa donde se puede escribir el nombre de una calle.
+# Para cada calle se toman sus tramos más largos, separados entre sí; las avenidas
+# (rango 1 y 2) llevan más etiquetas que las calles chicas. Cada etiqueta trae:
+#   nombre, lat y lon (punto medio del tramo), angulo (grados, para escribir el texto
+#   a lo largo de la calle, sin quedar de cabeza), rango (1 a 4) y largo del tramo (m)
+# ---------------------------------------------------------------------------
+posicion = {n["id"]: (n["lat"], n["lon"]) for n in nodos}
+etiquetas = []
+for nombre, tramos in tramos_por_calle.items():
+    rango = min(t[3] for t in tramos)              # la calle toma el rango de su tramo más importante
+    maximo, separacion = (8, 500) if rango <= 2 else (3, 300)
+    elegidas = []
+    for largo, u, v, _r in sorted(tramos, reverse=True):     # primero los tramos más largos
+        if largo < LARGO_MINIMO and elegidas:
+            break
+        lat1, lon1 = posicion[u]
+        lat2, lon2 = posicion[v]
+        lat_m, lon_m = (lat1 + lat2) / 2, (lon1 + lon2) / 2
+        if any(metros_entre(lat_m, lon_m, e["lat"], e["lon"]) < separacion for e in elegidas):
+            continue
+        # Dirección del tramo en pantalla (este = 0 grados, sentido contrario a las agujas)
+        angulo = math.degrees(math.atan2(lat2 - lat1, (lon2 - lon1) * math.cos(math.radians(lat1))))
+        if angulo > 90:
+            angulo -= 180
+        elif angulo <= -90:
+            angulo += 180
+        elegidas.append({"nombre": nombre, "lat": round(lat_m, 6), "lon": round(lon_m, 6),
+                         "angulo": round(angulo, 1), "rango": rango, "largo": round(largo)})
+        if len(elegidas) >= maximo:
+            break
+    etiquetas.extend(elegidas)
 
 # ---------------------------------------------------------------------------
 # Límites del mapa: sirven para convertir coordenadas a píxeles al dibujar
@@ -103,6 +174,7 @@ salida = {
     "limites": limites,
     "distritos": distritos,
     "calles": calles,
+    "etiquetas": etiquetas,
     "nodos": nodos,
     "aristas": aristas,
 }
@@ -110,4 +182,4 @@ with open(CARPETA / "grafo.json", "w", encoding="utf-8") as f:
     json.dump(salida, f, ensure_ascii=False)
 
 print(f"grafo.json generado: {len(nodos)} nodos, {len(aristas)} aristas, "
-      f"{len(calles)} calles con nombre.")
+      f"{len(calles)} calles con nombre, {len(etiquetas)} etiquetas.")
