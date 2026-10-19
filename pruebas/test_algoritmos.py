@@ -27,6 +27,8 @@ from algoritmos.greedy import vecino_mas_cercano, asignar_urgente
 from algoritmos.divide_venceras import dividir_en_zonas, rutas_por_zona
 from algoritmos.mochila import llenar_mochila
 from algoritmos.backtracking import buscar_rutas, zona_por_divide_venceras
+from mapa.caminos import a_estrella
+from mapa.recorridos import recorrido_por_calles
 from pruebas.benchmark import generar_pedidos, crear_cuadricula
 
 try:                                    # el canvas necesita tkinter; si no está, esas pruebas se saltan
@@ -327,6 +329,83 @@ class TestGrafo(unittest.TestCase):
         self.assertEqual(self.g.nombre_tramo("0", "1"), "Fila 0")
         self.assertEqual(self.g.nombre_tramo("0", "3"), "Columna 0")
         self.assertEqual(self.g.nombre_tramo("0", "8"), "Sin nombre")     # no están unidas
+
+
+class TestCaminosPorCalles(unittest.TestCase):
+    """A* y recorridos por calles (lo que se dibuja en el mapa en vez de líneas rectas)."""
+
+    def setUp(self):
+        self.g = crear_cuadricula()                                  # 3x3, esquinas '0' a '8'
+        n = self.g.nodos
+        self.h = distancia_recta(*n["0"], *n["1"])                   # largo de un tramo horizontal
+        self.v = distancia_recta(*n["0"], *n["3"])                   # largo de un tramo vertical
+
+    def test_a_estrella_encuentra_el_camino_mas_corto(self):
+        camino, metros = a_estrella(self.g, "0", "8")
+        self.assertEqual((camino[0], camino[-1], len(camino)), ("0", "8", 5))
+        self.assertAlmostEqual(metros, 2 * self.h + 2 * self.v, places=1)
+
+    def test_a_estrella_mismo_origen_y_destino(self):
+        self.assertEqual(a_estrella(self.g, "4", "4"), (["4"], 0.0))
+
+    def test_a_estrella_se_desvia_si_se_cierra_una_calle(self):
+        self.assertAlmostEqual(a_estrella(self.g, "0", "2")[1], 2 * self.h, places=1)
+        self.g.cerrar_calle("Fila 0")                                # el resultado anterior no debe reutilizarse
+        camino, metros = a_estrella(self.g, "0", "2")
+        self.assertEqual(camino, ["0", "3", "4", "5", "2"])
+        self.assertAlmostEqual(metros, 2 * self.v + 2 * self.h, places=1)
+
+    def test_a_estrella_sin_camino(self):
+        self.g.cerrar_calle("Fila 0")
+        self.g.cerrar_calle("Columna 0")                             # la esquina '0' queda aislada
+        camino, metros = a_estrella(self.g, "0", "8")
+        self.assertIsNone(camino)
+        self.assertEqual(metros, float("inf"))
+
+    def test_recorrido_sigue_las_calles(self):
+        a = pedido(1, *self.g.nodos["0"])
+        b = pedido(2, *self.g.nodos["8"])
+        rec = recorrido_por_calles(self.g, [a, b])
+        self.assertEqual(rec.trazo[0], self.g.nodos["0"])
+        self.assertEqual(rec.trazo[-1], self.g.nodos["8"])
+        for esquina in a_estrella(self.g, "0", "8")[0]:              # pasa por cada esquina del camino
+            self.assertIn(self.g.nodos[esquina], rec.trazo)
+        self.assertAlmostEqual(rec.metros, 2 * self.h + 2 * self.v, places=1)
+        self.assertGreater(rec.metros, distancia(a, b))              # por calles nunca es menos que la recta
+        self.assertEqual(rec.sin_camino, 0)
+
+    def test_recorrido_suma_el_acceso_de_la_parada_a_la_esquina(self):
+        lat, lon = self.g.nodos["0"]
+        a = pedido(1, lat + 0.0001, lon)                             # unos 11 m de la esquina '0'
+        b = pedido(2, *self.g.nodos["2"])
+        rec = recorrido_por_calles(self.g, [a, b])
+        self.assertAlmostEqual(rec.metros, distancia_recta(a.lat, a.lon, lat, lon) + 2 * self.h, places=1)
+
+    def test_recorrido_varias_paradas_tiene_un_tramo_por_pareja(self):
+        paradas = [pedido(i, *self.g.nodos[e]) for i, e in enumerate(["0", "2", "8", "6"])]
+        rec = recorrido_por_calles(self.g, paradas)
+        self.assertEqual(len(rec.tramos), 3)
+        self.assertAlmostEqual(sum(rec.tramos), rec.metros, places=1)
+
+    def test_recorrido_sin_mapa_es_linea_recta(self):
+        a, b = pedido(1, -13.50, -71.98), pedido(2, -13.51, -71.97)
+        rec = recorrido_por_calles(None, [a, b])
+        self.assertEqual(rec.trazo, [(a.lat, a.lon), (b.lat, b.lon)])
+        self.assertAlmostEqual(rec.metros, distancia(a, b), places=1)
+
+    def test_recorrido_sin_camino_cae_a_linea_recta(self):
+        self.g.cerrar_calle("Fila 2")
+        self.g.cerrar_calle("Columna 2")                             # la esquina '8' queda aislada
+        a, b = pedido(1, *self.g.nodos["0"]), pedido(2, *self.g.nodos["8"])
+        rec = recorrido_por_calles(self.g, [a, b])
+        self.assertEqual(rec.sin_camino, 1)
+        self.assertAlmostEqual(rec.metros, distancia(a, b), places=1)
+        self.assertEqual(rec.trazo, [(a.lat, a.lon), (b.lat, b.lon)])
+
+    def test_recorrido_vacio_o_con_una_parada(self):
+        self.assertEqual(recorrido_por_calles(self.g, []).metros, 0.0)
+        uno = recorrido_por_calles(self.g, [pedido(1)])
+        self.assertEqual((uno.metros, uno.tramos), (0.0, []))
 
 
 class TestBacktracking(unittest.TestCase):

@@ -6,11 +6,14 @@
 #     app.pedidos       -> lista de Pedido
 #     app.repartidores  -> lista de Repartidor
 #     app.canvas        -> CanvasMapa con limpiar_rutas() y dibujar_ruta(puntos[, color])
+#     app.grafo         -> Grafo (para dibujar las rutas por las calles reales)
+#     app.ejecutar_en_hilo(trabajo, al_terminar, al_error)   (opcional: evita congelar la ventana)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from algoritmos.divide_venceras import dividir_en_zonas, rutas_por_zona
+from mapa.recorridos import recorrido_por_calles
 
 COLORES = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
            "#008080", "#9a6324", "#800000", "#808000", "#000075"]
@@ -23,11 +26,12 @@ class PestanaZonas(ttk.Frame):
 
         barra = ttk.Frame(self)
         barra.pack(fill="x", padx=8, pady=8)
-        ttk.Button(barra, text="Dividir ciudad", command=self._dividir).pack(side="left")
+        self.boton = ttk.Button(barra, text="Dividir ciudad", command=self._dividir)
+        self.boton.pack(side="left")
         self.var_info = tk.StringVar(value="Se usa a todos los repartidores y todos los pedidos.")
         ttk.Label(barra, textvariable=self.var_info).pack(side="left", padx=10)
 
-        self.var_total = tk.StringVar(value="Metros totales (todas las zonas): -")
+        self.var_total = tk.StringVar(value="Recorrido por calles (todas las zonas): -")
         ttk.Label(self, textvariable=self.var_total,
                   font=("TkDefaultFont", 11, "bold")).pack(anchor="w", padx=8)
         self.var_aviso = tk.StringVar()
@@ -36,8 +40,8 @@ class PestanaZonas(ttk.Frame):
 
         columnas = ("color", "repartidor", "zona", "ruta", "carga", "metros")
         titulos = ("Color", "Repartidor", "Pedidos en zona", "Pedidos en ruta",
-                   "Carga (kg)", "Metros")
-        anchos = (70, 190, 110, 100, 120, 90)
+                   "Carga (kg)", "Por calles (m)")
+        anchos = (60, 170, 105, 95, 105, 105)
         self.tabla = ttk.Treeview(self, columns=columnas, show="headings", height=10)
         for col, titulo, ancho in zip(columnas, titulos, anchos):
             self.tabla.heading(col, text=titulo)
@@ -59,44 +63,73 @@ class PestanaZonas(ttk.Frame):
             messagebox.showwarning("Sin pedidos", "No hay pedidos cargados.")
             return
 
-        zonas = dividir_en_zonas(self.app.pedidos, repartidores)
-        resultados = rutas_por_zona(zonas)
-        self._mostrar(zonas, resultados)
-        self._dibujar(resultados)
+        pedidos = list(self.app.pedidos)
+        grafo = getattr(self.app, "grafo", None)
 
-    def _mostrar(self, zonas, resultados):
+        # Dividir y asignar zonas usa distancia recta; después se calcula el recorrido real por
+        # calles de cada repartidor (puede tardar un poco, por eso va en un hilo)
+        def trabajo():
+            zonas = dividir_en_zonas(pedidos, repartidores)
+            resultados = rutas_por_zona(zonas)
+            recorridos = [recorrido_por_calles(grafo, [rep] + ruta) for rep, ruta, _ in resultados]
+            return zonas, resultados, recorridos
+
+        def terminado(resultado):
+            self.boton.state(["!disabled"])
+            zonas, resultados, recorridos = resultado
+            self._mostrar(zonas, resultados, recorridos)
+            self._dibujar(recorridos)
+
+        def fallo(error):
+            self.boton.state(["!disabled"])
+            messagebox.showerror("Error", str(error))
+
+        self.boton.state(["disabled"])
+        en_hilo = getattr(self.app, "ejecutar_en_hilo", None)
+        if en_hilo is None:
+            try:
+                terminado(trabajo())
+            except Exception as error:
+                fallo(error)
+        else:
+            en_hilo(trabajo, terminado, fallo)
+
+    def _mostrar(self, zonas, resultados, recorridos):
         for fila in self.tabla.get_children():
             self.tabla.delete(fila)
 
         total_metros = 0.0
         sin_entrar = 0
-        for i, ((rep, pedidos_zona), (_, ruta, metros)) in enumerate(zip(zonas, resultados)):
+        sin_camino = 0
+        for i, ((rep, pedidos_zona), (_, ruta, _), recorrido) in enumerate(zip(zonas, resultados, recorridos)):
             carga = sum(p.peso for p in ruta)
             self.tabla.insert("", "end", tags=(f"c{i % len(COLORES)}",), values=(
                 "■■■", f"{rep.id} - {rep.nombre}", len(pedidos_zona), len(ruta),
-                f"{carga:g} / {rep.capacidad:g}", f"{metros:,.0f}"))
-            total_metros += metros
+                f"{carga:g} / {rep.capacidad:g}", f"{recorrido.metros:,.0f}"))
+            total_metros += recorrido.metros
             sin_entrar += len(pedidos_zona) - len(ruta)
+            sin_camino += recorrido.sin_camino
 
-        self.var_total.set(f"Metros totales (todas las zonas): {total_metros:,.0f} m  "
+        self.var_total.set(f"Recorrido por calles (todas las zonas): {total_metros:,.0f} m  "
                            f"({total_metros / 1000:.2f} km)")
+        avisos = []
         if sin_entrar > 0:
-            self.var_aviso.set(f"{sin_entrar} pedido(s) no entraron por capacidad del repartidor de su zona.")
-        else:
-            self.var_aviso.set("")
+            avisos.append(f"{sin_entrar} pedido(s) no entraron por capacidad del repartidor de su zona.")
+        if sin_camino > 0:
+            avisos.append(f"{sin_camino} tramo(s) sin camino por calles cerradas (se dibujan rectos).")
+        self.var_aviso.set(" ".join(avisos))
 
-    def _dibujar(self, resultados):
+    def _dibujar(self, recorridos):
         canvas = getattr(self.app, "canvas", None)
         if canvas is None:
             return
         canvas.limpiar_rutas()
-        for i, (rep, ruta, _) in enumerate(resultados):
-            if not ruta:
+        for i, recorrido in enumerate(recorridos):
+            if len(recorrido.trazo) < 2:
                 continue
             color = COLORES[i % len(COLORES)]
-            puntos = [(rep.lat, rep.lon)] + [(p.lat, p.lon) for p in ruta]
-            # >>> Si el dibujar_ruta de la Persona 4 no acepta `color`, solo se cambia aquí. <<<
+            # >>> Si el dibujar_ruta del canvas no acepta `color`, solo se cambia aquí. <<<
             try:
-                canvas.dibujar_ruta(puntos, color=color)
+                canvas.dibujar_ruta(recorrido.trazo, color=color)
             except TypeError:
-                canvas.dibujar_ruta(puntos)
+                canvas.dibujar_ruta(recorrido.trazo)

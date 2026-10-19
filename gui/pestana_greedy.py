@@ -7,11 +7,14 @@
 #     app.pedidos       -> lista de Pedido
 #     app.repartidores  -> lista de Repartidor
 #     app.canvas        -> CanvasMapa con limpiar_rutas() y dibujar_ruta(puntos, color)
+#     app.grafo         -> Grafo (para dibujar el recorrido por las calles reales)
+#     app.ejecutar_en_hilo(trabajo, al_terminar, al_error)   (opcional: evita congelar la ventana)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from algoritmos.greedy import vecino_mas_cercano, asignar_urgente, distancia
+from mapa.recorridos import recorrido_por_calles
 
 COLOR_URGENTE = "#d62728"
 NOMBRE_PRIORIDAD = {1: "urgente", 2: "normal", 3: "baja"}
@@ -32,14 +35,17 @@ class PestanaGreedy(ttk.Frame):
         self.combo = ttk.Combobox(barra, textvariable=self.var_repartidor,
                                   state="readonly", width=38)
         self.combo.pack(side="left", padx=6)
-        ttk.Button(barra, text="Ejecutar", command=self._ejecutar).pack(side="left")
+        self.boton = ttk.Button(barra, text="Ejecutar", command=self._ejecutar)
+        self.boton.pack(side="left")
 
         # --- Resultados
-        self.var_total = tk.StringVar(value="Metros totales: -")
+        self.var_total = tk.StringVar(value="Recorrido por calles: -")
+        self.var_recta = tk.StringVar(value="")
         self.var_carga = tk.StringVar(value="")
         self.var_omitidos = tk.StringVar(value="")
         ttk.Label(self, textvariable=self.var_total,
                   font=("TkDefaultFont", 11, "bold")).pack(anchor="w", padx=8)
+        ttk.Label(self, textvariable=self.var_recta).pack(anchor="w", padx=8)
         ttk.Label(self, textvariable=self.var_carga).pack(anchor="w", padx=8)
         ttk.Label(self, textvariable=self.var_omitidos, foreground="#b34700").pack(
             anchor="w", padx=8, pady=(0, 6))
@@ -55,15 +61,16 @@ class PestanaGreedy(ttk.Frame):
         self.combo_pedido = ttk.Combobox(fila, textvariable=self.var_pedido,
                                          state="readonly", width=42)
         self.combo_pedido.pack(side="left", padx=6)
-        ttk.Button(fila, text="Asignar", command=self._asignar_urgente).pack(side="left")
+        self.boton_urgente = ttk.Button(fila, text="Asignar", command=self._asignar_urgente)
+        self.boton_urgente.pack(side="left")
         self.var_urgente = tk.StringVar(value="")
         ttk.Label(urgente, textvariable=self.var_urgente, wraplength=520).pack(
             anchor="w", pady=(6, 0))
 
         # --- Tabla con el orden de visita
         columnas = ("orden", "id", "cliente", "sector", "peso", "tramo")
-        titulos = ("#", "ID", "Cliente", "Sector", "Peso (kg)", "Tramo (m)")
-        anchos = (40, 40, 200, 110, 80, 90)
+        titulos = ("#", "ID", "Cliente", "Sector", "Peso (kg)", "Por calles (m)")
+        anchos = (40, 40, 190, 110, 80, 100)
         self.tabla = ttk.Treeview(self, columns=columnas, show="headings", height=10)
         for col, titulo, ancho in zip(columnas, titulos, anchos):
             self.tabla.heading(col, text=titulo)
@@ -94,6 +101,26 @@ class PestanaGreedy(ttk.Frame):
         if textos and self.var_pedido.get() not in textos:
             self.combo_pedido.current(0)
 
+    def _correr(self, boton, trabajo, al_terminar):
+        """Ejecuta `trabajo` en un hilo si la ventana lo permite (calcular las calles puede tardar)."""
+        def terminado(resultado):
+            boton.state(["!disabled"])
+            al_terminar(resultado)
+
+        def fallo(error):
+            boton.state(["!disabled"])
+            messagebox.showerror("Error", str(error))
+
+        boton.state(["disabled"])
+        en_hilo = getattr(self.app, "ejecutar_en_hilo", None)
+        if en_hilo is None:
+            try:
+                terminado(trabajo())
+            except Exception as error:
+                fallo(error)
+        else:
+            en_hilo(trabajo, terminado, fallo)
+
     # ------------------------------------------------------------------
     # Vecino más cercano
     # ------------------------------------------------------------------
@@ -107,43 +134,53 @@ class PestanaGreedy(ttk.Frame):
             return
 
         repartidor = self._repartidores[indice]
-        ruta, metros = vecino_mas_cercano(repartidor, self.app.pedidos)
+        pedidos = list(self.app.pedidos)
+        grafo = getattr(self.app, "grafo", None)
 
-        self._mostrar_resultado(repartidor, ruta, metros)
-        self._dibujar(repartidor, ruta)
+        def trabajo():
+            # El algoritmo decide el orden (con distancia recta); luego se calcula por dónde
+            # pasaría el repartidor por las calles reales
+            ruta, metros = vecino_mas_cercano(repartidor, pedidos)
+            return ruta, metros, recorrido_por_calles(grafo, [repartidor] + ruta)
 
-    def _mostrar_resultado(self, repartidor, ruta, metros):
+        def terminado(resultado):
+            ruta, metros, recorrido = resultado
+            self._mostrar_resultado(repartidor, ruta, metros, recorrido)
+            self._dibujar(recorrido)
+
+        self._correr(self.boton, trabajo, terminado)
+
+    def _mostrar_resultado(self, repartidor, ruta, metros, recorrido):
         for fila in self.tabla.get_children():
             self.tabla.delete(fila)
 
-        # Tabla: orden de visita y metros de cada tramo
-        anterior = repartidor
+        # Tabla: orden de visita y metros reales por calles de cada tramo
         carga = 0.0
-        for orden, p in enumerate(ruta, start=1):
-            tramo = distancia(anterior, p)
+        for orden, (p, tramo) in enumerate(zip(ruta, recorrido.tramos), start=1):
             self.tabla.insert("", "end", values=(
-                orden, p.id, p.cliente, p.sector, f"{p.peso:g}", f"{tramo:.0f}"))
+                orden, p.id, p.cliente, p.sector, f"{p.peso:g}", f"{tramo:,.0f}"))
             carga += p.peso
-            anterior = p
 
-        self.var_total.set(f"Metros totales: {metros:,.0f} m  ({metros / 1000:.2f} km)")
+        self.var_total.set(f"Recorrido por calles: {recorrido.metros:,.0f} m  "
+                           f"({recorrido.metros / 1000:.2f} km)")
+        self.var_recta.set(f"En línea recta serían {metros:,.0f} m (con eso el algoritmo decide el orden).")
         self.var_carga.set(f"Pedidos en ruta: {len(ruta)}   |   "
                            f"Carga: {carga:g} / {repartidor.capacidad:g} kg")
 
         omitidos = len(self.app.pedidos) - len(ruta)
+        avisos = []
         if omitidos > 0:
-            self.var_omitidos.set(f"{omitidos} pedido(s) no entraron por capacidad.")
-        else:
-            self.var_omitidos.set("")
+            avisos.append(f"{omitidos} pedido(s) no entraron por capacidad.")
+        if recorrido.sin_camino > 0:
+            avisos.append(f"{recorrido.sin_camino} tramo(s) sin camino por calles cerradas (se dibujan rectos).")
+        self.var_omitidos.set(" ".join(avisos))
 
-    def _dibujar(self, repartidor, ruta):
+    def _dibujar(self, recorrido):
         canvas = getattr(self.app, "canvas", None)
-        if canvas is None or not ruta:
+        if canvas is None or len(recorrido.trazo) < 2:
             return
-        # Lista de puntos (lat, lon): primero el repartidor, luego cada pedido
-        puntos = [(repartidor.lat, repartidor.lon)] + [(p.lat, p.lon) for p in ruta]
         canvas.limpiar_rutas()
-        canvas.dibujar_ruta(puntos)
+        canvas.dibujar_ruta(recorrido.trazo)
 
     # ------------------------------------------------------------------
     # Pedido urgente -> repartidor más cercano con capacidad
@@ -159,17 +196,28 @@ class PestanaGreedy(ttk.Frame):
             return
 
         pedido = self._pedidos[indice]
-        elegido = asignar_urgente(pedido, repartidores)
-        if elegido is None:
-            self.var_urgente.set(f"Ningún repartidor tiene capacidad para el pedido "
-                                 f"#{pedido.id} ({pedido.peso:g} kg).")
-            return
+        grafo = getattr(self.app, "grafo", None)
 
-        metros = distancia(elegido, pedido)
-        self.var_urgente.set(f"Pedido #{pedido.id} ({pedido.cliente}) -> {elegido.nombre}, "
-                             f"a {metros:,.0f} m  (capacidad {elegido.capacidad:g} kg).")
-        canvas = getattr(self.app, "canvas", None)
-        if canvas is not None:
-            canvas.limpiar_rutas()
-            canvas.dibujar_ruta([(elegido.lat, elegido.lon), (pedido.lat, pedido.lon)],
-                                color=COLOR_URGENTE)
+        def trabajo():
+            elegido = asignar_urgente(pedido, repartidores)
+            if elegido is None:
+                return None, None
+            return elegido, recorrido_por_calles(grafo, [elegido, pedido])
+
+        def terminado(resultado):
+            elegido, recorrido = resultado
+            if elegido is None:
+                self.var_urgente.set(f"Ningún repartidor tiene capacidad para el pedido "
+                                     f"#{pedido.id} ({pedido.peso:g} kg).")
+                return
+            recta = distancia(elegido, pedido)
+            self.var_urgente.set(
+                f"Pedido #{pedido.id} ({pedido.cliente}) -> {elegido.nombre}: "
+                f"{recorrido.metros:,.0f} m por calles ({recta:,.0f} m en línea recta). "
+                f"Capacidad {elegido.capacidad:g} kg.")
+            canvas = getattr(self.app, "canvas", None)
+            if canvas is not None:
+                canvas.limpiar_rutas()
+                canvas.dibujar_ruta(recorrido.trazo, color=COLOR_URGENTE)
+
+        self._correr(self.boton_urgente, trabajo, terminado)

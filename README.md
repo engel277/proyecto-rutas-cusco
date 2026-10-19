@@ -21,7 +21,7 @@ El mapa está en `herramientas/grafo.json`. Si falta, se genera una sola vez con
 ## Qué se puede hacer en la aplicación
 
 A la izquierda están las pestañas (con una línea de ayuda de cada una) y a la derecha el mapa con su leyenda
-(rueda del mouse = zoom, arrastrar = mover, clic = elegir un punto; botones "Acercar al centro" y "Ver todo el mapa"). Las distancias entre pedidos y repartidores son en línea recta (Haversine).
+(rueda del mouse = zoom, arrastrar = mover, clic = elegir un punto; botones "Acercar al centro" y "Ver todo el mapa"). Los algoritmos deciden el orden de visita con la distancia en línea recta (Haversine, rápida), pero las rutas de Greedy, Zonas y Mochila se dibujan **por las calles reales** (A*) y muestran los metros reales que recorrería el repartidor. Si se cierra una calle en la pestaña Rutas, esos recorridos la rodean.
 El menú **Archivo** permite cargar pedidos desde un JSON o generar pedidos aleatorios.
 
 | Pestaña | Técnica | Qué hace |
@@ -43,6 +43,8 @@ modelos.py                   Pedido y Repartidor (dataclass) y cargar_pedidos()
 mapa/
   distancias.py              distancia(a, b): metros en línea recta (Haversine)
   grafo.py                   Grafo: esquinas, calles, calles cerradas, esquina más cercana
+  caminos.py                 a_estrella: camino más corto por calles entre dos esquinas
+  recorridos.py              recorrido_por_calles: convierte paradas en el trazo y los metros reales
 algoritmos/
   ordenacion_busqueda.py     Merge Sort, búsqueda binaria, agrupar por sector
   greedy.py                  vecino_mas_cercano, asignar_urgente
@@ -72,6 +74,7 @@ n = pedidos, r = repartidores, W = capacidad en unidades enteras.
 | Vecino más cercano | O(n²) | O(n) |
 | Dividir en zonas | O(n log n · log r) | O(n) |
 | Mochila 0/1 | O(n · W) | O(n · W) |
+| A* (camino por calles) | O(E log V) | O(V) |
 | Backtracking (puro) | exponencial | O(V) |
 
 El análisis completo y las comparaciones van en el informe técnico.
