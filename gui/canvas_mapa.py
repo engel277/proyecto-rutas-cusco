@@ -20,9 +20,32 @@
 # Qué necesita del grafo (el Grafo de Persona 1): limites, calles, distritos,
 # cerradas_nombre, cerradas_id, version y etiquetas (si el grafo.json es viejo y no las trae,
 # simplemente no se escriben nombres de calles).
+#
+# NUEVO - Fondo de mapa real (como Google Maps):
+#   - Teselas (mosaicos de 256x256 px) de Esri: "Mapa" (calles a color), "Satélite" y "Híbrido"
+#     (satélite + nombres). Un selector pequeño aparece arriba a la derecha del mapa.
+#   - Se descargan en hilos aparte (la ventana no se congela) y se guardan en la carpeta
+#     cache_mapa/ junto al proyecto: la segunda vez que se ve una zona carga al instante.
+#   - Necesita Pillow (pip install pillow) e internet la primera vez. Si falta Pillow, el mapa
+#     funciona igual que antes (calles sobre fondo liso).
+#   - Ningún método público cambió: convertir, inverso, dibujar_ruta, etc. siguen igual.
 
+import io
 import math
+import os
+import queue
+import threading
+import time
 import tkinter as tk
+import urllib.error
+import urllib.request
+from collections import OrderedDict
+
+try:
+    from PIL import Image, ImageTk
+    HAY_PIL = True
+except ImportError:                  # sin Pillow no hay fondo, pero lo demás funciona
+    HAY_PIL = False
 
 # ---------------------------------------------------------------------------
 # Colores y tamaños (todo junto para cambiarlos fácil)
@@ -47,6 +70,63 @@ MARGEN = 20                       # píxeles libres alrededor del mapa al encuad
 FACTOR_ZOOM = 1.25
 ZOOM_MAXIMO = 80                  # veces el zoom inicial
 ZOOM_MINIMO = 0.4
+
+# ---------------------------------------------------------------------------
+# Fondo de mapa (teselas)
+# ---------------------------------------------------------------------------
+TESELA = 256                      # lado (px) de cada tesela descargada
+Z_MIN, Z_MAX = 10, 18             # niveles de zoom de teselas que se piden (más allá se amplía)
+MARGEN_FONDO = 200                # px extra alrededor de la ventana que se precargan al mover el mapa
+MAX_TESELAS = 120                 # tope de seguridad por dibujo
+MAX_MEMORIA = 300                 # teselas que se guardan en RAM (~60 MB)
+HILOS_TESELAS = 6                 # descargas en paralelo
+USER_AGENT = "CuscoRutas/1.0 (proyecto academico UNSAAC)"
+DIR_CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache_mapa")
+
+_ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/"
+_URL_CALLES = _ESRI + "World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+_URL_SATELITE = _ESRI + "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+_URL_NOMBRES = _ESRI + "Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+
+# Colores del mapa base original (los que se usan sin fondo)
+_TEMA_CLARO = {"fondo": "#e8e4d8", "calle": "#6d6d6d", "etiqueta": "#555555", "distrito": "#333333",
+               "sombra": None, "texto_pedido": "black", "texto_rep": COLOR_REPARTIDOR}
+_TEMA_OSCURO = {"fondo": "#2b2b2b", "calle": "#ffe082", "etiqueta": "#ffffff", "distrito": "#ffffff",
+                "sombra": "#000000", "texto_pedido": "#ffffff", "texto_rep": "#e1bee7"}
+
+# urls: la primera es la base; las siguientes se pegan encima (transparentes).
+# etiquetas_propias: el fondo ya trae nombres de calles, así que no se escriben los del grafo.
+CAPAS = {
+    "Mapa":     {"urls": [_URL_CALLES], "ext": "png", "etiquetas_propias": True,
+                 "credito": "Fondo: © Esri", "tema": _TEMA_CLARO},
+    "Satélite": {"urls": [_URL_SATELITE], "ext": "jpg", "etiquetas_propias": False,
+                 "credito": "Fondo: © Esri, Maxar, Earthstar", "tema": _TEMA_OSCURO},
+    "Híbrido":  {"urls": [_URL_SATELITE, _URL_NOMBRES], "ext": "jpg", "etiquetas_propias": True,
+                 "credito": "Fondo: © Esri, Maxar, Earthstar", "tema": _TEMA_OSCURO},
+    "Sin fondo": {"urls": [], "ext": "png", "etiquetas_propias": False,
+                  "credito": "", "tema": {"fondo": COLOR_FONDO, "calle": COLOR_CALLE,
+                                          "etiqueta": COLOR_ETIQUETA, "distrito": COLOR_DISTRITO,
+                                          "sombra": None, "texto_pedido": "black",
+                                          "texto_rep": COLOR_REPARTIDOR}},
+}
+CAPA_INICIAL = "Mapa"
+
+
+# Matemática de teselas (proyección Web Mercator, la de Google Maps / OpenStreetMap / Esri)
+def _lon_a_x(lon, z):
+    return (lon + 180.0) / 360.0 * (1 << z)
+
+
+def _lat_a_y(lat, z):
+    return (1.0 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2.0 * (1 << z)
+
+
+def _tesela_a_latlon(x, y, z):
+    """Esquina superior izquierda de la tesela (x, y) del nivel z -> (lat, lon)."""
+    n = 1 << z
+    lon = x / n * 360.0 - 180.0
+    lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2.0 * y / n))))
+    return lat, lon
 
 
 def rango_maximo(z):
@@ -109,6 +189,9 @@ class CanvasMapa(tk.Canvas):
         # Versión del grafo con la que se dibujaron las calles cerradas
         self._version_vista = grafo.version
 
+        # Fondo de mapa: hilos de descarga, cachés y selector de capa
+        self._iniciar_fondo()
+
         self.bind("<Configure>", self._al_cambiar_tamano)
         self.bind("<ButtonPress-1>", self._presionar)
         self.bind("<B1-Motion>", self._arrastrar)
@@ -162,6 +245,8 @@ class CanvasMapa(tk.Canvas):
         # el zoom del usuario (para volver a encuadrar está el botón de la ventana)
         if not self._listo:
             self.reencuadrar()
+        else:
+            self._programar_fondo(150)          # el área nueva también necesita fondo
 
     def _dibujar_todo(self):
         self.delete("all")
@@ -170,6 +255,7 @@ class CanvasMapa(tk.Canvas):
         self._dibujar_distritos()
         self.actualizar_cerradas()
         self._dibujar_dinamicos()
+        self._actualizar_fondo()
 
     def _dibujar_calles(self):
         # Cada calle de doble sentido aparece dos veces en el grafo (ida y vuelta):
@@ -183,7 +269,7 @@ class CanvasMapa(tk.Canvas):
                     continue
                 vistos.add(clave)
                 xv, yv = self.convertir(*self.grafo.nodos[v])
-                self.create_line(xu, yu, xv, yv, fill=COLOR_CALLE, width=1,
+                self.create_line(xu, yu, xv, yv, fill=self._tema()["calle"], width=1,
                                  tags=("calle", "estatico"))
 
     def _dibujar_etiquetas(self):
@@ -192,8 +278,9 @@ class CanvasMapa(tk.Canvas):
         Se muestran solo los rangos que corresponden al zoom actual y se saltan las etiquetas que
         se solaparían con una ya puesta."""
         etiquetas = getattr(self.grafo, "etiquetas", None)
-        if not etiquetas:
+        if not etiquetas or CAPAS[self._capa]["etiquetas_propias"]:
             return
+        color = self._tema()["etiqueta"]
         maximo = rango_maximo(self._escala / self._escala_inicial)
         candidatas = [leer_etiqueta(e) for e in etiquetas]
         candidatas = [c for c in candidatas if c[4] <= maximo]
@@ -215,16 +302,21 @@ class CanvasMapa(tk.Canvas):
             ocupadas.update(celdas)
             try:
                 self.create_text(x, y, text=nombre, angle=angulo, font=FUENTE_ETIQUETA,
-                                 fill=COLOR_ETIQUETA, tags=("etiqueta",))   # "angle" existe desde Tk 8.6
+                                 fill=color, tags=("etiqueta",))   # "angle" existe desde Tk 8.6
             except tk.TclError:
                 self.create_text(x, y, text=nombre, font=FUENTE_ETIQUETA,
-                                 fill=COLOR_ETIQUETA, tags=("etiqueta",))   # Tk viejo: texto sin girar
+                                 fill=color, tags=("etiqueta",))   # Tk viejo: texto sin girar
 
     def _dibujar_distritos(self):
         # Nombre de cada distrito, para ubicarse en el mapa
+        tema = self._tema()
         for nombre, lat, lon in self.grafo.distritos:
             x, y = self.convertir(lat, lon)
-            self.create_text(x, y, text=nombre, fill=COLOR_DISTRITO,
+            if tema["sombra"]:
+                self.create_text(x + 1, y + 1, text=nombre, fill=tema["sombra"],
+                                 font=("TkDefaultFont", 10, "italic"),
+                                 tags=("distrito", "estatico"))
+            self.create_text(x, y, text=nombre, fill=tema["distrito"],
                              font=("TkDefaultFont", 10, "italic"),
                              tags=("distrito", "estatico"))
 
@@ -316,6 +408,7 @@ class CanvasMapa(tk.Canvas):
     # ------------------------------------------------------------------
     def _dibujar_dinamicos(self):
         self.delete("ruta", "pedido", "repartidor")
+        tema = self._tema()
         for puntos, color, ancho in self._rutas:
             self._trazar_ruta(puntos, color, ancho)
         for p in self._pedidos:
@@ -326,7 +419,7 @@ class CanvasMapa(tk.Canvas):
                              fill=color, outline="black", tags=("pedido",))
             self.create_text(x + RADIO_PEDIDO + 2, y - RADIO_PEDIDO - 2, text=str(p.id),
                              anchor="sw", font=("TkDefaultFont", 8, "bold"),
-                             tags=("pedido",))
+                             fill=tema["texto_pedido"], tags=("pedido",))
         for r in self._repartidores:
             x, y = self.convertir(r.lat, r.lon)
             self.create_rectangle(x - LADO_REPARTIDOR, y - LADO_REPARTIDOR,
@@ -334,7 +427,7 @@ class CanvasMapa(tk.Canvas):
                                   fill=COLOR_REPARTIDOR, outline="white",
                                   tags=("repartidor",))
             self.create_text(x, y + LADO_REPARTIDOR + 2, text=r.nombre, anchor="n",
-                             fill=COLOR_REPARTIDOR, font=("TkDefaultFont", 8, "bold"),
+                             fill=tema["texto_rep"], font=("TkDefaultFont", 8, "bold"),
                              tags=("repartidor",))
         self._ordenar_capas()
 
@@ -367,6 +460,7 @@ class CanvasMapa(tk.Canvas):
         self._dibujar_etiquetas()
         self._ordenar_capas()
         self._dibujar_dinamicos()                   # pedidos y rutas se redibujan para no deformarse
+        self._programar_fondo(50)                   # el fondo se re-pide al nivel de zoom que toque
 
     def _presionar(self, evento):
         self._press = (evento.x, evento.y)
@@ -381,8 +475,11 @@ class CanvasMapa(tk.Canvas):
             return
         self._arrastro = True
         self.scan_dragto(evento.x, evento.y, gain=1)
+        self._programar_fondo(150, reiniciar=False)   # cada ~150 ms mientras se arrastra
 
     def _soltar(self, evento):
+        if self._arrastro:
+            self._programar_fondo(30)
         if self._press is not None and not self._arrastro and self.al_clic is not None:
             lat, lon = self.inverso(self.canvasx(evento.x), self.canvasy(evento.y))
             self.al_clic(lat, lon)
@@ -392,3 +489,276 @@ class CanvasMapa(tk.Canvas):
         if self.al_mover is not None and self._listo:
             lat, lon = self.inverso(self.canvasx(evento.x), self.canvasy(evento.y))
             self.al_mover(lat, lon)
+
+    # ------------------------------------------------------------------
+    # Fondo de mapa: teselas de Esri (Mapa / Satélite / Híbrido)
+    # ------------------------------------------------------------------
+    def _tema(self):
+        return CAPAS[self._capa]["tema"]
+
+    def _iniciar_fondo(self):
+        self._capa = "Sin fondo"
+        self._fondo_after = None              # id del after pendiente (para no duplicar redibujos)
+        self._fotos = []                      # referencias a las PhotoImage (si no, Tk las borra)
+        self._memoria = OrderedDict()         # caché en RAM: (capa, z, x, y) -> imagen PIL
+        self._pendientes = set()              # teselas ya pedidas que aún no llegan
+        self._fallidos = {}                   # clave -> hora del último fallo (se reintenta a los 60 s)
+        self._sin_conexion = False
+        self._lock = threading.Lock()
+        self._jobs = queue.LifoQueue()        # LIFO: lo último que se ve en pantalla se descarga primero
+        self._resultados = queue.Queue()      # los hilos avisan aquí; solo el hilo de Tk toca widgets
+        self._var_fondo = tk.StringVar()
+        if not HAY_PIL:
+            return
+        self._capa = CAPA_INICIAL
+        self.configure(bg=self._tema()["fondo"])
+        self._crear_selector()
+        for _ in range(HILOS_TESELAS):
+            threading.Thread(target=self._trabajador, daemon=True).start()
+        self.after(150, self._revisar_teselas)
+
+    def _crear_selector(self):
+        # place() lo deja fijo en la esquina aunque el mapa se desplace
+        panel = tk.Frame(self, bg="white", bd=1, relief="solid")
+        panel.place(relx=1.0, x=-10, y=10, anchor="ne")
+        fila = tk.Frame(panel, bg="white")
+        fila.pack(padx=3, pady=3)
+        self._var_capa = tk.StringVar(value=self._capa)
+        for nombre in CAPAS:
+            tk.Radiobutton(fila, text=nombre, value=nombre, variable=self._var_capa,
+                           indicatoron=False, bg="white", selectcolor="#cfe3ff",
+                           padx=8, pady=2, bd=1, command=self._cambiar_capa).pack(side="left", padx=1)
+        tk.Label(panel, textvariable=self._var_fondo, bg="white", fg="#666666",
+                 font=("TkDefaultFont", 7)).pack(anchor="e", padx=4)
+
+    def _cambiar_capa(self):
+        self._capa = self._var_capa.get()
+        self.configure(bg=self._tema()["fondo"])
+        if not self._listo:
+            return
+        # Calles, nombres y distritos cambian de color (o de visibilidad) según la capa
+        self.delete("calle", "etiqueta", "distrito")
+        self._dibujar_calles()
+        self._dibujar_etiquetas()
+        self._dibujar_distritos()
+        self._dibujar_dinamicos()             # también reordena las capas
+        self._programar_fondo(0)
+
+    def _programar_fondo(self, espera=50, reiniciar=True):
+        """Agenda un redibujo del fondo. reiniciar=False: si ya hay uno agendado, no hace nada."""
+        if not HAY_PIL:
+            return
+        if self._fondo_after is not None:
+            if not reiniciar:
+                return
+            self.after_cancel(self._fondo_after)
+        self._fondo_after = self.after(espera, self._actualizar_fondo)
+
+    def _actualizar_fondo(self):
+        self._fondo_after = None
+        self.delete("fondo")
+        self._fotos = []
+        cfg = CAPAS[self._capa]
+        if not HAY_PIL or not self._listo or not cfg["urls"]:
+            self._var_fondo.set("")
+            return
+        # Zona visible (más un margen) en coordenadas del canvas y en lat/lon
+        x0 = self.canvasx(0) - MARGEN_FONDO
+        y0 = self.canvasy(0) - MARGEN_FONDO
+        x1 = self.canvasx(self.winfo_width()) + MARGEN_FONDO
+        y1 = self.canvasy(self.winfo_height()) + MARGEN_FONDO
+        lat_n, lon_o = self.inverso(x0, y0)
+        lat_s, lon_e = self.inverso(x1, y1)
+        # Nivel de teselas para que cada una mida ~256 px en pantalla
+        px_por_grado = self._escala * self._cos_lat
+        z = max(Z_MIN, min(Z_MAX, round(math.log2(px_por_grado * 360.0 / TESELA))))
+        n = 1 << z
+        tx0 = max(0, math.floor(_lon_a_x(lon_o, z)))
+        tx1 = min(n - 1, math.floor(_lon_a_x(lon_e, z)))
+        ty0 = max(0, math.floor(_lat_a_y(min(lat_n, 85.0), z)))
+        ty1 = min(n - 1, math.floor(_lat_a_y(max(lat_s, -85.0), z)))
+        if (tx1 - tx0 + 1) * (ty1 - ty0 + 1) > MAX_TESELAS:
+            return
+        clip = (round(x0), round(y0), round(x1), round(y1))
+        for ty in range(ty0, ty1 + 1):
+            for tx in range(tx0, tx1 + 1):
+                self._pintar_tesela((self._capa, z, tx, ty), clip)
+        self.tag_lower("fondo")               # el fondo siempre queda debajo de todo
+        self._actualizar_estado_fondo()
+
+    def _pintar_tesela(self, clave, clip):
+        capa, z, tx, ty = clave
+        # Se ubica por sus dos esquinas con el mismo convertir() que usan las calles: así el fondo
+        # y el grafo coinciden. Se redondea igual en tesela vecina, por eso no quedan rendijas
+        lat_a, lon_a = _tesela_a_latlon(tx, ty, z)
+        lat_b, lon_b = _tesela_a_latlon(tx + 1, ty + 1, z)
+        xa, ya = (round(v) for v in self.convertir(lat_a, lon_a))
+        xb, yb = (round(v) for v in self.convertir(lat_b, lon_b))
+
+        img = self._de_memoria(clave)
+        if img is not None:
+            self._poner_imagen(img, (0, 0, img.width, img.height), (xa, ya, xb, yb), clip)
+            return
+        self._pedir_tesela(clave)
+        # Mientras llega, se muestra la tesela del nivel anterior ampliada (borrosa pero útil)
+        for k in range(1, 4):
+            if z - k < 0:
+                break
+            padre = self._de_memoria((capa, z - k, tx >> k, ty >> k))
+            if padre is not None:
+                lado = padre.width / (1 << k)
+                izq = (tx - ((tx >> k) << k)) * lado
+                arr = (ty - ((ty >> k) << k)) * lado
+                self._poner_imagen(padre, (izq, arr, izq + lado, arr + lado), (xa, ya, xb, yb), clip)
+                return
+
+    def _poner_imagen(self, img, caja, destino, clip):
+        """Pega la parte `caja` de `img` en el rectángulo `destino` del canvas, recortando a `clip`
+        (así, aunque el zoom sea enorme, solo se procesa lo que se ve)."""
+        xa, ya, xb, yb = destino
+        ancho, alto = xb - xa, yb - ya
+        if ancho < 1 or alto < 1:
+            return
+        ix0, iy0 = max(xa, clip[0]), max(ya, clip[1])
+        ix1, iy1 = min(xb, clip[2]), min(yb, clip[3])
+        if ix0 >= ix1 or iy0 >= iy1:
+            return
+        izq, arr, der, aba = caja
+        sw, sh = der - izq, aba - arr
+        recorte = (izq + (ix0 - xa) / ancho * sw, arr + (iy0 - ya) / alto * sh,
+                   izq + (ix1 - xa) / ancho * sw, arr + (iy1 - ya) / alto * sh)
+        remuestreo = getattr(Image, "Resampling", Image).BILINEAR
+        foto = ImageTk.PhotoImage(img.resize((ix1 - ix0, iy1 - iy0), remuestreo, box=recorte))
+        self._fotos.append(foto)
+        self.create_image(ix0, iy0, image=foto, anchor="nw", tags=("fondo",))
+
+    # --- caché en memoria (compartida con los hilos, por eso el candado) ---
+    def _de_memoria(self, clave):
+        with self._lock:
+            img = self._memoria.get(clave)
+            if img is not None:
+                self._memoria.move_to_end(clave)
+            return img
+
+    def _guardar_memoria(self, clave, img):
+        with self._lock:
+            self._memoria[clave] = img
+            self._memoria.move_to_end(clave)
+            while len(self._memoria) > MAX_MEMORIA:
+                self._memoria.popitem(last=False)
+
+    # --- hilos de descarga ---
+    def _pedir_tesela(self, clave):
+        with self._lock:
+            if clave in self._pendientes:
+                return
+            if time.time() - self._fallidos.get(clave, 0) < 60:
+                return
+            self._pendientes.add(clave)
+        self._jobs.put(clave)
+
+    def _trabajador(self):
+        # Corre en un hilo aparte: NO toca widgets, solo deja el resultado en las colas
+        while True:
+            clave = self._jobs.get()
+            try:
+                if clave[0] != self._capa:    # el usuario ya cambió de capa: no vale la pena
+                    continue
+                img = self._leer_disco(clave) or self._descargar(clave)
+                if img is not None:
+                    self._guardar_memoria(clave, img)
+                    self._resultados.put(clave)
+            except Exception:
+                pass
+            finally:
+                with self._lock:
+                    self._pendientes.discard(clave)
+
+    def _ruta_cache(self, clave):
+        capa, z, x, y = clave
+        return os.path.join(DIR_CACHE, capa, str(z), str(x), f"{y}.{CAPAS[capa]['ext']}")
+
+    def _leer_disco(self, clave):
+        ruta = self._ruta_cache(clave)
+        if not os.path.exists(ruta):
+            return None
+        try:
+            return Image.open(ruta).convert("RGB")
+        except Exception:                     # archivo dañado: se borra y se vuelve a descargar
+            try:
+                os.remove(ruta)
+            except OSError:
+                pass
+            return None
+
+    def _descargar(self, clave):
+        capa, z, x, y = clave
+        cfg = CAPAS[capa]
+        base = None
+        try:
+            for i, plantilla in enumerate(cfg["urls"]):
+                pedido = urllib.request.Request(plantilla.format(z=z, x=x, y=y),
+                                                headers={"User-Agent": USER_AGENT})
+                try:
+                    with urllib.request.urlopen(pedido, timeout=10) as r:
+                        capa_img = Image.open(io.BytesIO(r.read())).convert("RGBA")
+                except Exception:
+                    if i == 0:
+                        raise                 # sin la base no hay tesela; las capas extra son opcionales
+                    continue
+                if base is None:
+                    base = capa_img
+                else:
+                    if capa_img.size != base.size:
+                        capa_img = capa_img.resize(base.size)
+                    base = Image.alpha_composite(base, capa_img)
+            img = base.convert("RGB")
+            self._sin_conexion = False
+        except urllib.error.HTTPError:        # el servidor respondió pero no tiene esa tesela
+            with self._lock:
+                self._fallidos[clave] = time.time()
+            return None
+        except Exception:                     # sin internet, tiempo agotado, etc.
+            self._sin_conexion = True
+            with self._lock:
+                self._fallidos[clave] = time.time()
+            return None
+        try:                                  # guardar en disco (si falla, no pasa nada)
+            ruta = self._ruta_cache(clave)
+            os.makedirs(os.path.dirname(ruta), exist_ok=True)
+            tmp = ruta + ".tmp"
+            if cfg["ext"] == "png":
+                img.save(tmp, format="PNG")
+            else:
+                img.save(tmp, format="JPEG", quality=88)
+            os.replace(tmp, ruta)
+        except Exception:
+            pass
+        return img
+
+    def _revisar_teselas(self):
+        # Cada 150 ms, en el hilo de Tk: si llegaron teselas nuevas, se redibuja el fondo
+        llego = False
+        try:
+            while True:
+                if self._resultados.get_nowait()[0] == self._capa:
+                    llego = True
+        except queue.Empty:
+            pass
+        if llego:
+            self._programar_fondo(30, reiniciar=False)
+        else:
+            self._actualizar_estado_fondo()
+        self.after(150, self._revisar_teselas)
+
+    def _actualizar_estado_fondo(self):
+        with self._lock:
+            pendientes = len(self._pendientes)
+        if pendientes:
+            texto = f"Cargando fondo ({pendientes})..."
+        elif self._sin_conexion:
+            texto = "Sin conexión: no se pudo cargar el fondo"
+        else:
+            texto = CAPAS[self._capa]["credito"]
+        if self._var_fondo.get() != texto:
+            self._var_fondo.set(texto)
